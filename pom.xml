@@ -68,6 +68,12 @@
             <version>0.0.67</version>
         </dependency>
 
+        <!-- Route + alan eşleştirme tanımlarının önbelleği: Redis -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
         <!-- REST çağrıları: OpenFeign -->
         <dependency>
             <groupId>org.springframework.cloud</groupId>

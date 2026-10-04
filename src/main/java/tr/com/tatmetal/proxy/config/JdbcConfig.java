@@ -37,8 +37,8 @@ public class JdbcConfig {
         return new ZenergyNamedJdbcTemplate(ds);
     }
 
+    /** İkinci veri kaynağı @Primary OLMAMALI: iki @Primary DataSource varsa schema.sql (spring.sql.init) çalışmaz. */
     @Bean(name = "pgDb")
-    @Primary
     @ConfigurationProperties(prefix = "datasource.pgdb")
     public DataSource pgDataSource() {
         return DataSourceBuilder.create().build();
@@ -46,7 +46,6 @@ public class JdbcConfig {
 
 
     @Bean(name = "pgJdbcTemplate")
-    @Primary
     public ZenergyNamedJdbcTemplate pgJdbcTemplate(@Qualifier("pgDb") DataSource ds) {
         return new ZenergyNamedJdbcTemplate(ds);
     }

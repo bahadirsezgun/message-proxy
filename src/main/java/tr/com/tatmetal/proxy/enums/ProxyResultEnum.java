@@ -16,7 +16,8 @@ import tr.com.zenergy.mini_jpa.util.IEnumNumber;
 public enum ProxyResultEnum implements IEnumNumber, Serializable {
     SUCCESS(1, "Başarılı", "Success"),
     TARGET_ERROR(2, "Hedef Hata Döndü", "Target Error"),
-    CONNECTION_ERROR(3, "Hedefe Ulaşılamadı", "Connection Error");
+    CONNECTION_ERROR(3, "Hedefe Ulaşılamadı", "Connection Error"),
+    MAPPING_ERROR(4, "Alan Eşleştirme Hatası", "Mapping Error");
 
     private final Integer id;
     private final String value;

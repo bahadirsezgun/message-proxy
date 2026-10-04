@@ -20,11 +20,11 @@ import org.springframework.stereotype.Service;
 import feign.FeignException;
 import feign.Request;
 import tr.com.tatmetal.proxy.client.ProxyForwardClient;
-import tr.com.tatmetal.proxy.entity.ProxyRouteEntity;
 import tr.com.tatmetal.proxy.enums.HttpMethodEnum;
+import tr.com.tatmetal.proxy.model.ProxyRouteDefinition;
 
 /**
- * Tablo bağımsız servis: bir mesajı verilen route tanımına göre hedefe iletir ve
+ * Tablo bağımsız servis: eşleştirmesi yapılmış bir mesajı verilen route tanımına göre hedefe iletir ve
  * her iletimi proxy_message_log tablosuna kaydeder.
  * Hedefin 4xx/5xx cevapları exception'a dönüştürülmez; status, header ve gövde aynen çağırana döner.
  */
@@ -49,17 +49,21 @@ public class ProxyForwardService {
     }
 
     /**
-     * @param route           kullanılacak route tanımı
+     * Alan eşleştirmesi yapılmış mesajı hedefe iletir ve iletimi loglar.
+     * ProxyGatewayService tarafından mapping sonrası çağrılır.
+     *
+     * @param route           Redis'ten okunan route tanımı
+     * @param target          path değişkenleri ve query string uygulanmış hedef adres
      * @param incomingMethod  gelen isteğin HTTP metodu
      * @param requestPath     gelen isteğin path + query bilgisi (log için)
      * @param clientIp        isteği gönderen IP (log için)
      * @param incomingHeaders gelen isteğin header'ları
-     * @param body            gelen isteğin ham gövdesi
+     * @param sourceBody      gelen isteğin eşleştirme öncesi ham gövdesi (log için)
+     * @param body            hedefe gönderilecek (eşleştirilmiş) gövde
      */
-    public ResponseEntity<byte[]> forward(ProxyRouteEntity route, HttpMethod incomingMethod,
+    public ResponseEntity<byte[]> forward(ProxyRouteDefinition route, URI target, HttpMethod incomingMethod,
                                           String requestPath, String clientIp,
-                                          Map<String, String> incomingHeaders, byte[] body) {
-        URI target = URI.create(route.getTargetUrl());
+                                          Map<String, String> incomingHeaders, byte[] sourceBody, byte[] body) {
         HttpMethod method = resolveMethod(route.getTargetMethod(), incomingMethod);
         Map<String, String> headers = filterHeaders(incomingHeaders);
         String correlationId = resolveCorrelationId(headers);
@@ -71,9 +75,9 @@ public class ProxyForwardService {
         long start = System.nanoTime();
         try {
             ResponseEntity<byte[]> response = execute(method, target, options, headers, body);
-            proxyMessageLogService.record(route, correlationId, clientIp, method.name(), requestPath,
-                    headers, body, response.getStatusCode().value(), toHeaderMap(response.getHeaders()),
-                    response.getBody(), elapsedMs(start), null);
+            proxyMessageLogService.record(route, target.toString(), correlationId, clientIp, method.name(),
+                    requestPath, headers, sourceBody, body, response.getStatusCodeValue(),
+                    toHeaderMap(response.getHeaders()), response.getBody(), elapsedMs(start), null);
             return response;
         } catch (FeignException e) {
             long duration = elapsedMs(start);
@@ -81,16 +85,16 @@ public class ProxyForwardService {
                 // Bağlantı hatası / timeout: hedefe ulaşılamadı
                 logger.error("Hedefe ulaşılamadı. route={}, target={}, correlationId={}, error={}",
                         route.getRouteCode(), target, correlationId, e.toString());
-                proxyMessageLogService.record(route, correlationId, clientIp, method.name(), requestPath,
-                        headers, body, 0, null, null, duration, e.getMessage());
+                proxyMessageLogService.record(route, target.toString(), correlationId, clientIp, method.name(),
+                        requestPath, headers, sourceBody, body, 0, null, null, duration, e.getMessage());
                 throw e;
             }
             logger.warn("Hedef hata döndü. route={}, target={}, correlationId={}, status={}",
                     route.getRouteCode(), target, correlationId, e.status());
             ResponseEntity<byte[]> response = toResponseEntity(e);
-            proxyMessageLogService.record(route, correlationId, clientIp, method.name(), requestPath,
-                    headers, body, e.status(), e.responseHeaders(), response.getBody(), duration,
-                    e.getMessage());
+            proxyMessageLogService.record(route, target.toString(), correlationId, clientIp, method.name(),
+                    requestPath, headers, sourceBody, body, e.status(), e.responseHeaders(), response.getBody(),
+                    duration, e.getMessage());
             return response;
         }
     }
@@ -111,11 +115,11 @@ public class ProxyForwardService {
         throw new IllegalArgumentException("Desteklenmeyen HTTP metodu: " + method);
     }
 
-    private HttpMethod resolveMethod(HttpMethodEnum routeMethod, HttpMethod incomingMethod) {
-        if (routeMethod == null || routeMethod == HttpMethodEnum.PASS_THROUGH) {
+    private HttpMethod resolveMethod(String routeMethod, HttpMethod incomingMethod) {
+        if (routeMethod == null || HttpMethodEnum.PASS_THROUGH.name().equals(routeMethod)) {
             return incomingMethod;
         }
-        return HttpMethod.valueOf(routeMethod.name());
+        return HttpMethod.valueOf(routeMethod);
     }
 
     /** Gelen istekte X-Correlation-Id varsa kullanılır, yoksa üretilip hedefe de eklenir. */
