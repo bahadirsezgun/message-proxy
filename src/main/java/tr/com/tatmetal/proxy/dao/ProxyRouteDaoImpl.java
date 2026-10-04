@@ -26,7 +26,7 @@ public class ProxyRouteDaoImpl {
     private Logger logger = LoggerFactory.getLogger(ProxyRouteDaoImpl.class);
 
     public ProxyRouteDaoImpl(@Qualifier("exdbJdbcTemplate")
-                             ZenergyNamedJdbcTemplate<ProxyRouteEntity> exdbJdbcTemplate) {
+            ZenergyNamedJdbcTemplate<ProxyRouteEntity> exdbJdbcTemplate) {
         this.exdbJdbcTemplate = exdbJdbcTemplate;
     }
 
