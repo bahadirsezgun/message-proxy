@@ -366,56 +366,84 @@ Hepsi `IEnumNumber` uygular ve DB'de `smallint` olarak saklanır. JSON'da hem `i
   - Yabancı anahtar: `fkN_<tablo> FOREIGN KEY (...) REFERENCES message_proxy.<tablo>(id)`
 - `status` değerleri: 1 CANCELLED, 2 PASSIVE, 3 ACTIVE, 4 CLOSED. Kayıt silinmez; `status = 1` yapılır ve `counter_of_unique_data` `message_proxy.counter_of_unique_data_seq` ile artırılır.
 
+Aşağıdaki tablolarda `<BASE_COLUMNS>` dışındaki tüm kolonlar anlatılır. Çalışma anında kullanılmayan, sadece bilgi amaçlı kolonlar ayrıca belirtilmiştir.
+
 ### `proxy_route` — Route tanımları
 
-| Kolon | Tip | Varsayılan | Açıklama |
-|---|---|---|---|
-| `route_code` | varchar(50) | — | Route kodu (`uk1`) |
-| `route_description` | varchar(150) | `-` | Açıklama |
-| `source_path` | varchar(500) | `-` | Gelen path (prefix hariç): `/erp/order`, `/erp/order/{id}`. `-` ise route Redis'e yüklenmez. |
-| `source_method` | smallint | 0 | 0 tüm metotlar, 1 GET, 2 POST, 3 PUT, 4 PATCH, 5 DELETE |
-| `target_url` | varchar(500) | — | Hedef URL. `{değişken}` içerebilir: `http://erp/api/orders/{id}` |
-| `target_method` | smallint | 0 | 0 gelen metot, diğerleri `source_method` ile aynı |
-| `connect_timeout_ms` | integer | 5000 | Bağlantı timeout'u |
-| `read_timeout_ms` | integer | 30000 | Cevap okuma timeout'u |
-| `log_body` | smallint | 1 | Gövdeler loglansın mı |
-| `pass_unmapped_fields` | smallint | 1 | 1: eşleştirilmeyen alanlar aynen aktarılır, 0: sadece eşleştirilenler gönderilir |
+Her satır bir entegrasyon uç noktasıdır: "şu path'e şu metotla gelen istek şu adrese iletilsin".
+
+| Kolon | Tip | Zorunlu / Varsayılan | Açıklama | Örnek / geçerli değerler |
+|---|---|---|---|---|
+| `route_code` | varchar(50) | Zorunlu | Route'un benzersiz iş kodu (`uk1`). Uygulama loglarında ve `proxy_message_log.route_code`'da görünür; bir isteği hangi kuralın karşıladığını bulmak için kullanılır. | `ERP_ORDER_CREATE` |
+| `route_description` | varchar(150) | `-` | Route'un ne iş yaptığını anlatan serbest metin. **Sadece bilgi amaçlıdır**, çalışma anında kullanılmaz. | `ERP sipariş oluşturma` |
+| `source_path` | varchar(500) | `-` | İstemcinin çağırdığı path, **`/proxy` ön eki olmadan**. `/` ile başlar, sonda `/` olmaz (API ile kaydederken düzeltilir). Büyük/küçük harfe duyarlıdır. `{ad}` tek bir path parçasını değişken olarak yakalar; `*` ve `**` joker olarak kullanılabilir. **`-` bırakılırsa route Redis'e yüklenmez**, yani hiçbir istekle eşleşmez. | `/erp/order`, `/erp/order/{id}`, `/ifs/{firma}/part/{kod}` |
+| `source_method` | smallint | 0 | Route'un hangi HTTP metoduyla gelen isteği karşıladığı. Aynı path için hem 0 hem belirli metot tanımlıysa belirli metot önceliklidir. | 0 tüm metotlar, 1 GET, 2 POST, 3 PUT, 4 PATCH, 5 DELETE |
+| `target_url` | varchar(500) | Zorunlu | Hedef sistemin tam adresi (şema, host, port, path). `source_path`'teki `{ad}` değişkenleri aynı adla kullanılabilir, değerleri URL-encode edilerek yerine yazılır. Gelen query string sona eklenir (`target_url`'de `?` varsa `&` ile). `source_path`'te olmayan bir değişken kullanılırsa adres geçersiz olur ve istek 500 `INVALID_TARGET_URL` ile döner. | `http://erp.local:8081/api/siparis/{id}` |
+| `target_method` | smallint | 0 | Hedefe hangi metotla gidileceği. 0 ise gelen metot aynen kullanılır. **1 (GET) seçilirse gövde gönderilmez.** | 0 gelen metot, 1 GET, 2 POST, 3 PUT, 4 PATCH, 5 DELETE |
+| `connect_timeout_ms` | integer | 5000 | Hedefe TCP bağlantısı kurmak için beklenecek en uzun süre (ms). Aşılırsa istemciye 502/504 döner, log'a `CONNECTION_ERROR` yazılır. 0 veya negatif ise 5000 kullanılır. | `3000` |
+| `read_timeout_ms` | integer | 30000 | Bağlantı kurulduktan sonra hedefin cevabı için beklenecek en uzun süre (ms). Aşılırsa istemciye 504 `TARGET_TIMEOUT` döner. 0 veya negatif ise 30000 kullanılır. Uzun süren işlemler için artırın. | `60000` |
+| `log_body` | smallint | 1 | Bu route'un istek/cevap gövdeleri `proxy_message_log`'a yazılsın mı. Büyük veya hassas veri taşıyan route'larda 0 yapın; header, status, süre gibi diğer bilgiler yine loglanır. | 0 Hayır, 1 Evet |
+| `pass_unmapped_fields` | smallint | 1 | `proxy_field_map`'te tanımı olmayan alanlar ne olsun. 1: aynen hedefe aktarılır, sadece eşleştirilen alanların adı/yeri değişir. 0: sadece eşleştirilen alanlar gönderilir, diğerleri atılır. Hem REQUEST hem RESPONSE eşleştirmesine uygulanır. Route'un hiç eşleştirmesi yoksa etkisi yoktur, gövde aynen gider. | 0 Hayır, 1 Evet |
 
 Anahtarlar:
-- `uk1_proxy_route (route_code, counter_of_unique_data)`
-- `uk2_proxy_route (source_path, source_method, counter_of_unique_data)` (`source_path <> '-'` olanlar için)
+- `uk1_proxy_route (route_code, counter_of_unique_data)`: aynı kodla iki aktif route olamaz.
+- `uk2_proxy_route (source_path, source_method, counter_of_unique_data)`: aynı path + metot için iki aktif route olamaz (`source_path = '-'` olanlar hariç).
 
 ### `proxy_field_map` — Alan eşleştirmeleri
 
-| Kolon | Tip | Varsayılan | Açıklama |
-|---|---|---|---|
-| `proxy_route_id` | uuid | — | `fk1` → `proxy_route.id` |
-| `map_direction` | smallint | 1 | 1 REQUEST (giden istek), 2 RESPONSE (dönen cevap) |
-| `source_field` | varchar(250) | — | Kaynak alan yolu |
-| `target_field` | varchar(250) | — | Hedef alan yolu |
-| `is_required` | smallint | 0 | 1 ise alan yoksa (ve default yoksa) hata |
-| `default_value` | varchar(500) | null | Alan yoksa yazılacak değer (JSON olarak yorumlanır) |
-| `field_order` | integer | 0 | Uygulanma sırası |
-| `map_description` | varchar(150) | `-` | Açıklama |
+Her satır bir route için tek bir alan dönüşümüdür: "kaynaktaki şu alan, hedefte şu ad/yerde olsun".
 
-Anahtar: `uk1_proxy_field_map (proxy_route_id, map_direction, target_field, counter_of_unique_data)`. Aynı hedef alana iki eşleştirme yazılamaz.
+| Kolon | Tip | Zorunlu / Varsayılan | Açıklama | Örnek / geçerli değerler |
+|---|---|---|---|---|
+| `proxy_route_id` | uuid | Zorunlu | Eşleştirmenin ait olduğu route (`fk1` → `proxy_route.id`). Route aktif değilse (status ≠ 3) eşleştirmeleri de yüklenmez. | `3f1c2b7e-...` |
+| `map_direction` | smallint | 1 | Eşleştirmenin hangi yönde uygulanacağı. REQUEST: istemcinin gövdesi hedefe gitmeden önce. RESPONSE: hedefin cevabı istemciye dönmeden önce; sadece 2xx JSON cevaplarda çalışır. | 1 REQUEST, 2 RESPONSE |
+| `source_field` | varchar(250) | Zorunlu | Değerin okunacağı alan yolu. REQUEST'te istemcinin gövdesindeki, RESPONSE'ta hedefin cevabındaki alandır. Nokta iç içe alanı, `[]` dizinin her elemanını ifade eder. İndeks (`[0]`) desteklenmez. Büyük/küçük harfe duyarlıdır. | `customerName`, `customer.tax`, `items[].code`, `tags[]` |
+| `target_field` | varchar(250) | Zorunlu | Değerin yazılacağı alan yolu. `source_field` ile **aynı sayıda `[]`** içermelidir. Ara nesneler yoksa oluşturulur. Aynı route ve yönde iki satır aynı hedef alana yazamaz (`uk1`). | `musteri.ad`, `musteri.vergiNo`, `kalemler[].urunKodu`, `etiketler[]` |
+| `is_required` | smallint | 0 | Kaynakta alan yoksa ne olacağı. 1 ve `default_value` boşsa: REQUEST'te istek hedefe **gönderilmez**, istemciye 400 döner; RESPONSE'ta istemciye 502 döner. 0 ise alan hedefte oluşturulmaz. Dizi alanlarında (`items[].code`) kontrol her eleman için ayrı yapılır; bir eşleştirme zorunluysa dizinin kendisi de zorunlu sayılır. | 0 Hayır, 1 Evet |
+| `default_value` | varchar(500) | null | Kaynakta alan yoksa hedefe yazılacak değer. Dolu olduğunda `is_required` kontrolü yapılmaz. JSON olarak yorumlanır: `10` sayı, `true` boolean, `"WEB"` metin, `{}` nesne. Geçerli JSON değilse (`WEB`) metin kabul edilir. Dizi elemanı alanlarında her eleman için ayrı uygulanır. Sadece dizi adı değiştiren satırlarda (`tags[]`) kullanılmaz. | `1`, `"WEB"`, `true`, `null` |
+| `field_order` | integer | 0 | Eşleştirmelerin işlenme ve hedefe yazılma sırası (küçükten büyüğe). Değerler önce okunup sonra yazıldığı için çoğu durumda sonucu değiştirmez; hedef JSON'daki alan sırasını etkiler. İki eşleştirme iç içe aynı yere yazıyorsa (`a → x`, `b → x.y`) sonradan yazan kazanır. | `1`, `2`, `3` |
+| `map_description` | varchar(150) | `-` | Eşleştirmenin açıklaması. **Sadece bilgi amaçlıdır**, çalışma anında kullanılmaz. | `Müşteri adı ERP formatına` |
+
+Anahtar: `uk1_proxy_field_map (proxy_route_id, map_direction, target_field, counter_of_unique_data)`.
 
 ### `proxy_message_log` — İletim kayıtları
 
-| Kolon | Açıklama |
-|---|---|
-| `proxy_route_id`, `route_code` | Kullanılan route. Kod, route sonradan değişse de kalsın diye kopyalanır. |
-| `correlation_id` | `X-Correlation-Id` değeri |
-| `client_ip` | İsteği gönderen IP |
-| `request_method`, `request_path` | Hedefe giden metot; gelen path + query |
-| `target_url` | Gerçekten çağrılan hedef URL (değişkenler doldurulmuş) |
-| `request_headers` | Hedefe giden header'lar (hassaslar maskeli) |
-| `source_request_body` | Gelen, **eşleştirme öncesi** gövde |
-| `request_body` | Hedefe giden, **eşleştirilmiş** gövde |
-| `response_status`, `response_headers`, `response_body` | Hedefin cevabı. Ulaşılamadıysa status 0. |
-| `duration_ms` | Hedef çağrısının süresi |
-| `result_type` | 1 SUCCESS, 2 TARGET_ERROR, 3 CONNECTION_ERROR, 4 MAPPING_ERROR |
-| `error_message` | Hata mesajı (en fazla 2000 karakter) |
+Bu tablo elle doldurulmaz. Her iletimde `ProxyForwardService`, eşleştirme hatalarında `ProxyGatewayService` tarafından yazılır. Route bulunamayan (404) istekler bu tabloya yazılmaz.
+
+| Kolon | Tip | Açıklama | Örnek |
+|---|---|---|---|
+| `proxy_route_id` | uuid | İsteği karşılayan route (`fk1` → `proxy_route.id`). | `3f1c2b7e-...` |
+| `route_code` | varchar(50) | Route kodu. Route sonradan değişse de log anlaşılır kalsın diye kopyalanır. | `ERP_ORDER_CREATE` |
+| `correlation_id` | varchar(100) | İsteğin izleme numarası. İstemci `X-Correlation-Id` header'ı gönderdiyse o, göndermediyse üretilen UUID. Aynı değer hedefe gönderilir ve cevapta istemciye döner; bir isteği uçtan uca izlemek için bu kolonla aranır. | `5b0c9e1a-...` |
+| `client_ip` | varchar(50) | İsteği gönderen IP. Önce `X-Forwarded-For`'daki ilk adres, yoksa bağlantı adresi. | `10.0.4.21` |
+| `request_method` | varchar(10) | Normal iletimde **hedefe gönderilen** metot (`target_method` uygulanmış hali). Eşleştirme hatasında istemcinin **gelen** metodu. | `PUT` |
+| `request_path` | varchar(1000) | İstemcinin çağırdığı path ve query string, `/proxy` ön eki olmadan. | `/erp/order/42?detay=1` |
+| `target_url` | varchar(1000) | Gerçekten çağrılan (veya çağrılacak) hedef adres; değişkenler doldurulmuş, query string eklenmiş hali. | `http://erp.local/api/siparis/42?detay=1` |
+| `request_headers` | text | Hedefe gönderilen header'lar, satır başına `Ad: değer`. `Host`, `Content-Length` gibi bağlantı header'ları iletilmediği için burada da yoktur. Eşleştirme hatası kaydında ise istemcinin gönderdiği header'ların tamamı yazılır. `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key` değerleri `******` olarak maskelenir. | `Content-Type: application/json` |
+| `source_request_body` | text | İstemciden gelen, **eşleştirme öncesi** gövde. | `{"customerName":"Ali"}` |
+| `request_body` | text | Hedefe gönderilen, **eşleştirme sonrası** gövde. Eşleştirme yoksa `source_request_body` ile aynıdır. `MAPPING_ERROR` kayıtlarında boştur. | `{"musteri":{"ad":"Ali"}}` |
+| `response_status` | integer | Hedefin döndüğü HTTP status. Hedefe ulaşılamadıysa 0. İstek eşleştirmesi hatasında istemciye dönen 400; cevap eşleştirmesi hatasında hedefin orijinal (2xx) status'u. | `201`, `500`, `0` |
+| `response_headers` | text | Hedeften dönen header'lar (hassas olanlar maskeli). Hedefe ulaşılamadıysa veya eşleştirme hatasında boş. | `Content-Type: application/json` |
+| `response_body` | text | Hedeften dönen gövde, **cevap eşleştirmesi öncesi** hali. İstek eşleştirmesi hatasında istemciye dönen hata JSON'u. | `{"siparisNo":"S-1001"}` |
+| `duration_ms` | bigint | Hedef çağrısının süresi (ms); sadece HTTP çağrısını ölçer. Eşleştirme hatalarında 0. | `184` |
+| `result_type` | smallint | İletimin sonucu. Hangi durumda hangi değer yazıldığı aşağıdaki tabloda. | 1, 2, 3, 4 |
+| `error_message` | varchar(2000) | Hata açıklaması: eşleştirme hatasının sebebi, bağlantı hatası mesajı veya hedefin hata cevabından üretilen mesaj. Başarılı iletimlerde `-`. 2000 karakterde kesilir. | `Zorunlu alan bulunamadı: customerName` |
+
+`result_type` değerleri:
+
+| Değer | Ad | Ne zaman |
+|---|---|---|
+| 1 | SUCCESS | Hedef 2xx veya 3xx döndü |
+| 2 | TARGET_ERROR | Hedef 4xx veya 5xx döndü (cevap istemciye aynen iletilir) |
+| 3 | CONNECTION_ERROR | Hedefe bağlanılamadı veya zaman aşımı (`response_status = 0`) |
+| 4 | MAPPING_ERROR | İstek veya cevap eşleştirilemedi |
+
+> **Cevap eşleştirmesi hatasında iki satır oluşur.** İstek hedefe gönderilip 2xx cevap alındığı için önce normal iletim kaydı (`SUCCESS`, hedefe giden gövde ve süre ile) yazılır. Cevap eşleştirilemeyince aynı `correlation_id` ile ikinci bir `MAPPING_ERROR` kaydı eklenir ve istemciye 502 döner. İstek eşleştirmesi hatasında istek gönderilmediği için tek satır (`MAPPING_ERROR`) vardır.
+
+Gövde kolonları (`source_request_body`, `request_body`, `response_body`) için ortak kurallar:
+- Sadece route'un `log_body = 1` olduğu durumda yazılır; aksi halde boştur.
+- UTF-8 metin olarak saklanır, bu yüzden ikili (binary) içerik okunamaz görünür.
+- `proxy.log.max-body-length` (varsayılan 100000) karakterde kesilir.
 
 İndeksler: `(proxy_route_id, date_of_recorded)`, `(correlation_id)`, `(date_of_recorded)`.
 
