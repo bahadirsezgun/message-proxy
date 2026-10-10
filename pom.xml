@@ -85,6 +85,12 @@
             <artifactId>feign-hc5</artifactId>
         </dependency>
 
+        <!-- Swagger/OpenAPI dokümanları YAML olarak da okunabilsin (sürüm Spring Boot BOM'undan gelir) -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.dataformat</groupId>
+            <artifactId>jackson-dataformat-yaml</artifactId>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

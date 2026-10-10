@@ -175,3 +175,104 @@ COMMENT ON COLUMN message_proxy.proxy_message_log.duration_ms IS 'Hedef çağrı
 COMMENT ON COLUMN message_proxy.proxy_message_log.source_request_body IS 'Gelen isteğin eşleştirme öncesi gövdesi (proxy_route.log_body = 1 ise)';
 COMMENT ON COLUMN message_proxy.proxy_message_log.result_type IS '1: SUCCESS (2xx/3xx), 2: TARGET_ERROR (4xx/5xx), 3: CONNECTION_ERROR (timeout/ulaşılamadı), 4: MAPPING_ERROR (alan eşleştirme hatası)';
 COMMENT ON COLUMN message_proxy.proxy_message_log.error_message IS 'Hata mesajı';
+
+-- ---------------------------------------------------------------------
+-- swagger_source : Endpoint'leri okunacak servislerin swagger/OpenAPI adresleri
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS message_proxy.swagger_source (
+    -- <BASE_COLUMNS>
+    id                      uuid                        NOT NULL DEFAULT gen_random_uuid(),
+    id_serial               SERIAL                      NOT NULL,
+    etag                    uuid                        NOT NULL DEFAULT gen_random_uuid(),
+    status                  smallint                    NOT NULL DEFAULT 3,
+    date_of_recorded        timestamp without time zone NOT NULL DEFAULT now(),
+    user_who_recorded       character varying(50)       NOT NULL DEFAULT '-'::character varying,
+    date_of_last_updated    timestamp without time zone NOT NULL DEFAULT now(),
+    user_who_last_updated   character varying(50)       NOT NULL DEFAULT '-'::character varying,
+    counter_of_unique_data  bigint                      NOT NULL DEFAULT 0,
+    -- Tabloya özel alanlar
+    source_code             character varying(50)       NOT NULL,
+    source_description      character varying(150)      NOT NULL DEFAULT '-'::character varying,
+    swagger_url             character varying(500)      NOT NULL,
+    target_base_url         character varying(500)      NOT NULL DEFAULT '-'::character varying,
+    auto_sync               smallint                    NOT NULL DEFAULT 1,
+    last_sync_date          timestamp without time zone,
+    last_sync_result        smallint                    NOT NULL DEFAULT 0,
+    last_sync_message       character varying(2000)     NOT NULL DEFAULT '-'::character varying,
+    endpoint_count          integer                     NOT NULL DEFAULT 0,
+    CONSTRAINT swagger_source_pkey PRIMARY KEY (id),
+    CONSTRAINT uk0_swagger_source UNIQUE (id_serial),
+    CONSTRAINT uk1_swagger_source UNIQUE (source_code, counter_of_unique_data)
+);
+
+COMMENT ON TABLE  message_proxy.swagger_source IS 'Endpoint listesi swagger/OpenAPI dokümanından okunacak servisler';
+COMMENT ON COLUMN message_proxy.swagger_source.id_serial IS 'Sıralı ID için. Sorgulardaki sıralama kolaylığı için';
+COMMENT ON COLUMN message_proxy.swagger_source.etag IS 'Versiyon kontrolü yaparak aynı anda tek transaction a müsade etmek için';
+COMMENT ON COLUMN message_proxy.swagger_source.status IS '1: CANCELLED, 2: PASSIVE, 3: ACTIVE, 4: CLOSED';
+COMMENT ON COLUMN message_proxy.swagger_source.counter_of_unique_data IS 'CANCELLED kayıtlarda sequence ile artırılır; aynı iş anahtarı tekrar eklenebilsin diye UK''ya dahildir';
+COMMENT ON COLUMN message_proxy.swagger_source.source_code IS 'Servis kodu';
+COMMENT ON COLUMN message_proxy.swagger_source.source_description IS 'Açıklaması';
+COMMENT ON COLUMN message_proxy.swagger_source.swagger_url IS 'swagger-ui adresi (…/swagger-ui/index.html) veya doğrudan doküman adresi (…/v3/api-docs)';
+COMMENT ON COLUMN message_proxy.swagger_source.target_base_url IS 'Endpoint tam adresleri için taban URL; ''-'' ise dokümandaki servers/host bilgisi kullanılır';
+COMMENT ON COLUMN message_proxy.swagger_source.auto_sync IS '0: Hayır, 1: Evet - zamanlanmış senkronizasyona dahil mi';
+COMMENT ON COLUMN message_proxy.swagger_source.last_sync_date IS 'Son senkronizasyon zamanı';
+COMMENT ON COLUMN message_proxy.swagger_source.last_sync_result IS '0: NEVER, 1: SUCCESS, 2: ERROR';
+COMMENT ON COLUMN message_proxy.swagger_source.last_sync_message IS 'Son senkronizasyon özeti veya hata mesajı';
+COMMENT ON COLUMN message_proxy.swagger_source.endpoint_count IS 'Son başarılı senkronizasyonda dokümanda bulunan endpoint sayısı';
+
+-- ---------------------------------------------------------------------
+-- swagger_endpoint : Swagger dokümanından okunan endpoint'ler (senkron servisi yazar)
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS message_proxy.swagger_endpoint (
+    -- <BASE_COLUMNS>
+    id                      uuid                        NOT NULL DEFAULT gen_random_uuid(),
+    id_serial               SERIAL                      NOT NULL,
+    etag                    uuid                        NOT NULL DEFAULT gen_random_uuid(),
+    status                  smallint                    NOT NULL DEFAULT 3,
+    date_of_recorded        timestamp without time zone NOT NULL DEFAULT now(),
+    user_who_recorded       character varying(50)       NOT NULL DEFAULT '-'::character varying,
+    date_of_last_updated    timestamp without time zone NOT NULL DEFAULT now(),
+    user_who_last_updated   character varying(50)       NOT NULL DEFAULT '-'::character varying,
+    counter_of_unique_data  bigint                      NOT NULL DEFAULT 0,
+    -- Tabloya özel alanlar
+    swagger_source_id       uuid                        NOT NULL,
+    api_group               character varying(100)      NOT NULL DEFAULT '-'::character varying,
+    http_method             character varying(10)       NOT NULL,
+    path                    character varying(1000)     NOT NULL,
+    full_url                character varying(1500)     NOT NULL DEFAULT '-'::character varying,
+    operation_id            character varying(200)      NOT NULL DEFAULT '-'::character varying,
+    summary                 character varying(500)      NOT NULL DEFAULT '-'::character varying,
+    description             text,
+    tags                    character varying(500)      NOT NULL DEFAULT '-'::character varying,
+    deprecated              smallint                    NOT NULL DEFAULT 0,
+    request_content_type    character varying(500)      NOT NULL DEFAULT '-'::character varying,
+    parameters_json         text,
+    request_body_json       text,
+    responses_json          text,
+    last_seen_date          timestamp without time zone NOT NULL DEFAULT now(),
+    CONSTRAINT swagger_endpoint_pkey PRIMARY KEY (id),
+    CONSTRAINT uk0_swagger_endpoint UNIQUE (id_serial),
+    CONSTRAINT uk1_swagger_endpoint UNIQUE (swagger_source_id, api_group, http_method, path, counter_of_unique_data),
+    CONSTRAINT fk1_swagger_endpoint FOREIGN KEY (swagger_source_id) REFERENCES message_proxy.swagger_source (id)
+);
+
+CREATE INDEX IF NOT EXISTS ix1_swagger_endpoint ON message_proxy.swagger_endpoint (swagger_source_id, status);
+
+COMMENT ON TABLE  message_proxy.swagger_endpoint IS 'Swagger/OpenAPI dokümanından okunan endpoint''ler';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.status IS '1: CANCELLED (dokümandan kalktı), 2: PASSIVE, 3: ACTIVE, 4: CLOSED';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.counter_of_unique_data IS 'CANCELLED kayıtlarda sequence ile artırılır; endpoint dokümana geri gelirse yeni satır açılır';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.swagger_source_id IS 'Endpoint''in okunduğu kaynak (swagger_source.id)';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.api_group IS 'springdoc grup adı; grup yoksa ''-''';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.http_method IS 'GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, TRACE';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.path IS 'Dokümandaki path (ör. /api/v1/orders/{id})';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.full_url IS 'Taban URL + path';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.operation_id IS 'OpenAPI operationId';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.summary IS 'OpenAPI summary';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.description IS 'OpenAPI description';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.tags IS 'Virgülle ayrılmış tag listesi';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.deprecated IS '0: Hayır, 1: Evet';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.request_content_type IS 'İstek gövdesi içerik tipleri (virgülle ayrılmış)';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.parameters_json IS 'Path/query/header parametreleri (JSON)';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.request_body_json IS 'İstek gövdesi tanımı (JSON)';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.responses_json IS 'Cevap tanımları (JSON)';
+COMMENT ON COLUMN message_proxy.swagger_endpoint.last_seen_date IS 'Endpoint''in dokümanda en son görüldüğü senkronizasyon zamanı';

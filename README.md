@@ -21,13 +21,14 @@ Gelen REST isteklerini, veritabanında tanımlı kurallara göre başka bir sist
 7. [Redis önbellek](#redis-önbellek)
 8. [Route eşleşme kuralları](#route-eşleşme-kuralları)
 9. [Alan eşleştirme (mapping)](#alan-eşleştirme-mapping)
-10. [REST API referansı](#rest-api-referansı)
-11. [Hata cevapları](#hata-cevapları)
-12. [Loglama](#loglama)
-13. [Konfigürasyon](#konfigürasyon)
-14. [Yeni bir entegrasyon tanımlama (adım adım)](#yeni-bir-entegrasyon-tanımlama-adım-adım)
-15. [Geliştirici notları](#geliştirici-notları)
-16. [Sorun giderme](#sorun-giderme)
+10. [Swagger'dan endpoint senkronizasyonu](#swaggerdan-endpoint-senkronizasyonu)
+11. [REST API referansı](#rest-api-referansı)
+12. [Hata cevapları](#hata-cevapları)
+13. [Loglama](#loglama)
+14. [Konfigürasyon](#konfigürasyon)
+15. [Yeni bir entegrasyon tanımlama (adım adım)](#yeni-bir-entegrasyon-tanımlama-adım-adım)
+16. [Geliştirici notları](#geliştirici-notları)
+17. [Sorun giderme](#sorun-giderme)
 
 ---
 
@@ -132,6 +133,7 @@ tr.com.tatmetal.proxy
 ├── model                            Redis'te tutulan tanım nesneleri (standart dışı ek paket)
 ├── exception                        Uygulama exception'ları (standart dışı ek paket)
 ├── client                           OpenFeign client'ları   (standart dışı ek paket)
+├── swagger                          Swagger dokümanı okuma/parse (standart dışı ek paket)
 └── config                           Spring konfigürasyonları (standart dışı ek paket)
 ```
 
@@ -561,6 +563,61 @@ Eşleştirmeler: `customerName → musteri.ad`, `items[].code → kalemler[].uru
 
 ---
 
+## Swagger'dan endpoint senkronizasyonu
+
+Bir servisin swagger-ui adresi `swagger_source` tablosuna kaydedilir; uygulama dokümanı okuyup tüm endpoint'leri `swagger_endpoint` tablosuna yazar ve güncel tutar.
+
+**Kaynak ekleme** (kaydedince endpoint'ler hemen okunur, sonuç cevapta döner):
+
+```bash
+curl -X POST http://localhost:8080/api/v1/swagger-source \
+  -H 'Content-Type: application/json' \
+  -d '{"sourceCode":"ERP","sourceDescription":"ERP servisi","swaggerUrl":"http://erp:8081/swagger-ui/index.html"}'
+```
+
+`swaggerUrl` için kabul edilen adresler:
+
+| Örnek | Not |
+|---|---|
+| `http://host:8080/swagger-ui/index.html` | springdoc swagger-ui; context path desteklenir |
+| `http://host:8080/swagger-ui.html` | eski springfox; `/v2/api-docs` bulunur |
+| `http://host:8080/swagger-ui/index.html?url=/openapi.yaml` | `?url=` / `?configUrl=` parametreleri kullanılır |
+| `http://host:8080/v3/api-docs` | doğrudan doküman (JSON veya YAML) |
+| `http://host:8080` | servis kökü; standart adresler sırayla denenir |
+
+springdoc grupları (`/v3/api-docs/swagger-config` içindeki `urls`) varsa hepsi okunur, grup adı `api_group` alanına yazılır. OpenAPI 3.x ve Swagger 2.0 desteklenir.
+
+**Ne zaman çalışır**
+
+| Tetikleyici | Ayar |
+|---|---|
+| Kaynak kaydedildiğinde (`autoSync = 1`) | — |
+| Uygulama açılışında | `swagger.sync.on-startup=true` |
+| Zamanlanmış | `swagger.sync.cron=0 0 * * * *` (her saat başı) |
+| Elle, tek kaynak | `POST /api/v1/swagger-source/{id}/sync` |
+| Elle, tüm kaynaklar | `POST /api/v1/swagger-source/sync` |
+
+Zamanlayıcı ve açılış senkronizasyonu sadece `status = 3 (ACTIVE)` ve `auto_sync = 1` kaynakları işler. `swagger.sync.enabled=false` ikisini de kapatır.
+
+**Yazma kuralları**
+
+- İş anahtarı: `swagger_source_id + api_group + http_method + path` (+ `counter_of_unique_data`).
+- Yeni endpoint eklenir; içeriği değişen güncellenir (etag yenilenir); aynı kalanın etag'ine dokunulmaz.
+- Dokümandan kalkan endpoint silinmez: `status = 1 (CANCELLED)`, `counter_of_unique_data` sequence'tan artırılır. Geri gelirse yeni satır açılır.
+- Elle `PASSIVE` yapılan endpoint senkronizasyonda `PASSIVE` kalır.
+- Doküman okunamaz ya da boş gelirse mevcut kayıtlara dokunulmaz; hata `last_sync_result = 2` ve `last_sync_message` alanlarına yazılır.
+- Yazma tek transaction'dadır; kaynak bazlı PostgreSQL advisory lock ile aynı kaynak aynı anda iki kez senkronize edilmez (birden fazla instance dahil).
+- `full_url` dokümandaki `servers` (OAS3) ya da `host + basePath` (Swagger 2) ile oluşturulur; servis gateway arkasındaysa `targetBaseUrl` alanına gateway adresi yazılır.
+
+Endpoint sorgulama örneği:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/swagger-endpoint/search \
+  -H 'Content-Type: application/json' -d '{"swaggerSourceId":"<id>","httpMethod":"POST"}'
+```
+
+---
+
 ## REST API referansı
 
 ### Proxy girişi
@@ -687,6 +744,10 @@ Proxy'nin **kendi ürettiği** hatalar aşağıdaki formatta döner. Hedef siste
 | `proxy.cache.key-prefix` | `message-proxy` | Redis anahtar ön eki. Aynı Redis'i paylaşan ortamlarda farklı verin. |
 | `proxy.forward.default-url` | `http://localhost` | Feign'in zorunlu taban adresi. Gerçek hedef her çağrıda belirlenir. |
 | `proxy.log.max-body-length` | `100000` | Log'a yazılacak gövdenin en fazla karakter sayısı |
+| `swagger.sync.enabled` | `true` | Swagger zamanlayıcısı ve açılış senkronizasyonu açık mı |
+| `swagger.sync.on-startup` | `true` | Açılışta ACTIVE + `auto_sync = 1` kaynakları senkronize et |
+| `swagger.sync.cron` | `0 0 * * * *` | Zamanlanmış senkronizasyon (her saat başı) |
+| `swagger.sync.connect-timeout-ms` / `read-timeout-ms` | 5000 / 30000 | Swagger dokümanı okuma timeout'ları |
 | `exss.auth`, `exss.unauth.url` | `true`, `/ns/` | `exss-service` kimlik doğrulama ayarları |
 
 > **Güvenlik:** Veritabanı ve Redis şifrelerini `application.properties`'e açık yazmak yerine ortam değişkeninden okuyun. Örnek: `spring.redis.password=${REDIS_PASSWORD:}`.
