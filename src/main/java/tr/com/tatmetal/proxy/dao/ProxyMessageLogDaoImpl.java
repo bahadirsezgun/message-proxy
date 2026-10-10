@@ -14,9 +14,8 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Repository;
 
 import tr.com.zenergy.mini_jpa.annotation.aop.ExtendsBaseEntity;
-import tr.com.zenergy.mini_jpa.jdbc.params_to_condition.ParamsToCondition;
 import tr.com.zenergy.mini_jpa.jdbc.template.ZenergyNamedJdbcTemplate;
-
+import tr.com.zenergy.mini_jpa.jdbc.params_to_condition.ParamsToCondition;
 import tr.com.tatmetal.proxy.entity.ProxyMessageLogEntity;
 
 @Repository
@@ -26,7 +25,7 @@ public class ProxyMessageLogDaoImpl {
     private Logger logger = LoggerFactory.getLogger(ProxyMessageLogDaoImpl.class);
 
     public ProxyMessageLogDaoImpl(@Qualifier("exdbJdbcTemplate")
-                                  ZenergyNamedJdbcTemplate<ProxyMessageLogEntity> exdbJdbcTemplate) {
+            ZenergyNamedJdbcTemplate<ProxyMessageLogEntity> exdbJdbcTemplate) {
         this.exdbJdbcTemplate = exdbJdbcTemplate;
     }
 

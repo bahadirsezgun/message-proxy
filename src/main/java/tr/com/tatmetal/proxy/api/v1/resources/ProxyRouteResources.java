@@ -15,6 +15,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import tr.com.tatmetal.proxy.entity.ProxyRouteEntity;
+import tr.com.tatmetal.proxy.model.ProxyRouteDefinition;
+import tr.com.tatmetal.proxy.services.ProxyRouteCacheService;
 import tr.com.tatmetal.proxy.services.ProxyRouteService;
 
 @RestController
@@ -22,9 +24,11 @@ import tr.com.tatmetal.proxy.services.ProxyRouteService;
 public class ProxyRouteResources {
 
     private final ProxyRouteService proxyRouteService;
+    private final ProxyRouteCacheService proxyRouteCacheService;
 
-    public ProxyRouteResources(ProxyRouteService proxyRouteService) {
+    public ProxyRouteResources(ProxyRouteService proxyRouteService, ProxyRouteCacheService proxyRouteCacheService) {
         this.proxyRouteService = proxyRouteService;
+        this.proxyRouteCacheService = proxyRouteCacheService;
     }
 
     @GetMapping("/{id}/{etag}")
@@ -56,5 +60,18 @@ public class ProxyRouteResources {
     @DeleteMapping
     public ResponseEntity<ProxyRouteEntity> delete(@RequestBody ProxyRouteEntity entity) {
         return ResponseEntity.ok(proxyRouteService.delete(entity));
+    }
+
+    /** Veritabanına doğrudan (SQL ile) yapılan değişikliklerden sonra Redis'i yeniler. */
+    @PostMapping("/cache/refresh")
+    public ResponseEntity<Map<String, Object>> refreshCache() {
+        int count = proxyRouteCacheService.reload();
+        return ResponseEntity.ok(Map.of("loadedRouteCount", count));
+    }
+
+    /** Redis'te o an tutulan route + eşleştirme tanımları. */
+    @GetMapping("/cache")
+    public ResponseEntity<List<ProxyRouteDefinition>> getCache() {
+        return ResponseEntity.ok(proxyRouteCacheService.getAll());
     }
 }

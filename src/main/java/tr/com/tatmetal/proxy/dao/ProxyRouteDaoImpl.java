@@ -1,5 +1,6 @@
 package tr.com.tatmetal.proxy.dao;
 
+import static tr.com.tatmetal.proxy.dao.sql.ProxyRouteSql.PROXY_ROUTE_GET_ACTIVE_SQL;
 import static tr.com.tatmetal.proxy.dao.sql.ProxyRouteSql.PROXY_ROUTE_GET_ONE_SQL;
 import static tr.com.tatmetal.proxy.dao.sql.ProxyRouteSql.PROXY_ROUTE_GET_SQL;
 
@@ -26,7 +27,7 @@ public class ProxyRouteDaoImpl {
     private Logger logger = LoggerFactory.getLogger(ProxyRouteDaoImpl.class);
 
     public ProxyRouteDaoImpl(@Qualifier("exdbJdbcTemplate")
-                             ZenergyNamedJdbcTemplate<ProxyRouteEntity> exdbJdbcTemplate) {
+            ZenergyNamedJdbcTemplate<ProxyRouteEntity> exdbJdbcTemplate) {
         this.exdbJdbcTemplate = exdbJdbcTemplate;
     }
 
@@ -70,6 +71,16 @@ public class ProxyRouteDaoImpl {
         } catch (Exception e) {
             logger.error(e.toString());
             return null;
+        }
+    }
+
+    /** Aktif ve gelen path'i tanımlı route'lar (Redis yüklemesi için). Hata durumunda exception fırlatır. */
+    public List<ProxyRouteEntity> getActiveList() {
+        try {
+            return exdbJdbcTemplate.findEntityList(PROXY_ROUTE_GET_ACTIVE_SQL, new HashMap<>(), ProxyRouteEntity.class);
+        } catch (Exception e) {
+            logger.error(e.toString());
+            throw new IllegalStateException("Aktif kayıtlar okunamadı: " + e.getMessage(), e);
         }
     }
 }

@@ -36,15 +36,28 @@ CREATE TABLE IF NOT EXISTS message_proxy.proxy_route (
     -- Tabloya özel alanlar
     route_code              character varying(50)       NOT NULL,
     route_description       character varying(150)      NOT NULL DEFAULT '-'::character varying,
+    source_path             character varying(500)      NOT NULL DEFAULT '-'::character varying,
+    source_method           smallint                    NOT NULL DEFAULT 0,
     target_url              character varying(500)      NOT NULL,
     target_method           smallint                    NOT NULL DEFAULT 0,
     connect_timeout_ms      integer                     NOT NULL DEFAULT 5000,
     read_timeout_ms         integer                     NOT NULL DEFAULT 30000,
     log_body                smallint                    NOT NULL DEFAULT 1,
+    pass_unmapped_fields    smallint                    NOT NULL DEFAULT 1,
     CONSTRAINT proxy_route_pkey PRIMARY KEY (id),
     CONSTRAINT uk0_proxy_route UNIQUE (id_serial),
     CONSTRAINT uk1_proxy_route UNIQUE (route_code, counter_of_unique_data)
 );
+
+-- Önceki sürümle oluşmuş tablolar için yeni kolonlar (idempotent)
+ALTER TABLE message_proxy.proxy_route ADD COLUMN IF NOT EXISTS source_path character varying(500) NOT NULL DEFAULT '-'::character varying;
+ALTER TABLE message_proxy.proxy_route ADD COLUMN IF NOT EXISTS source_method smallint NOT NULL DEFAULT 0;
+ALTER TABLE message_proxy.proxy_route ADD COLUMN IF NOT EXISTS pass_unmapped_fields smallint NOT NULL DEFAULT 1;
+
+-- uk2: aynı gelen path + metot için tek aktif route. source_path '-' (henüz tanımlanmamış) kayıtlar hariç.
+CREATE UNIQUE INDEX IF NOT EXISTS uk2_proxy_route
+    ON message_proxy.proxy_route (source_path, source_method, counter_of_unique_data)
+    WHERE source_path <> '-';
 
 COMMENT ON TABLE  message_proxy.proxy_route IS 'Gelen mesajın iletileceği hedef tanımları';
 COMMENT ON COLUMN message_proxy.proxy_route.id_serial IS 'Sıralı ID için. Sorgulardaki sıralama kolaylığı için';
@@ -53,11 +66,55 @@ COMMENT ON COLUMN message_proxy.proxy_route.status IS '1: CANCELLED, 2: PASSIVE,
 COMMENT ON COLUMN message_proxy.proxy_route.counter_of_unique_data IS 'CANCELLED kayıtlarda sequence ile artırılır; aynı iş anahtarı tekrar eklenebilsin diye UK''ya dahildir';
 COMMENT ON COLUMN message_proxy.proxy_route.route_code IS 'Route kodu (gelen istekte kullanılacak anahtar)';
 COMMENT ON COLUMN message_proxy.proxy_route.route_description IS 'Açıklaması';
-COMMENT ON COLUMN message_proxy.proxy_route.target_url IS 'Mesajın iletileceği hedef URL';
+COMMENT ON COLUMN message_proxy.proxy_route.source_path IS 'Gelen isteğin path bilgisi (gateway prefix hariç). Örn: /erp/order veya /erp/order/{id}';
+COMMENT ON COLUMN message_proxy.proxy_route.source_method IS 'Gelen isteğin metodu. 0: Tüm metotlar, 1: GET, 2: POST, 3: PUT, 4: PATCH, 5: DELETE';
+COMMENT ON COLUMN message_proxy.proxy_route.pass_unmapped_fields IS '0: Hayır - sadece eşleştirilen alanlar gönderilir, 1: Evet - eşleşmeyen alanlar aynı isimle aktarılır';
+COMMENT ON COLUMN message_proxy.proxy_route.target_url IS 'Mesajın iletileceği hedef URL. Path değişkeni içerebilir: http://erp/api/orders/{id}';
 COMMENT ON COLUMN message_proxy.proxy_route.target_method IS '0: PASS_THROUGH, 1: GET, 2: POST, 3: PUT, 4: PATCH, 5: DELETE';
 COMMENT ON COLUMN message_proxy.proxy_route.connect_timeout_ms IS 'Hedefe bağlantı timeout (ms)';
 COMMENT ON COLUMN message_proxy.proxy_route.read_timeout_ms IS 'Hedeften cevap okuma timeout (ms)';
 COMMENT ON COLUMN message_proxy.proxy_route.log_body IS '0: Hayır, 1: Evet - mesaj gövdesi loglansın mı';
+
+-- ---------------------------------------------------------------------
+-- proxy_field_map : Gelen istek / dönen cevap alanlarının hedef alan isimleriyle eşleştirmesi
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS message_proxy.proxy_field_map (
+    -- <BASE_COLUMNS>
+    id                      uuid                        NOT NULL DEFAULT gen_random_uuid(),
+    id_serial               SERIAL                      NOT NULL,
+    etag                    uuid                        NOT NULL DEFAULT gen_random_uuid(),
+    status                  smallint                    NOT NULL DEFAULT 3,
+    date_of_recorded        timestamp without time zone NOT NULL DEFAULT now(),
+    user_who_recorded       character varying(50)       NOT NULL DEFAULT '-'::character varying,
+    date_of_last_updated    timestamp without time zone NOT NULL DEFAULT now(),
+    user_who_last_updated   character varying(50)       NOT NULL DEFAULT '-'::character varying,
+    counter_of_unique_data  bigint                      NOT NULL DEFAULT 0,
+    -- Tabloya özel alanlar
+    proxy_route_id          uuid                        NOT NULL,
+    map_direction           smallint                    NOT NULL DEFAULT 1,
+    source_field            character varying(250)      NOT NULL,
+    target_field            character varying(250)      NOT NULL,
+    is_required             smallint                    NOT NULL DEFAULT 0,
+    default_value           character varying(500),
+    field_order             integer                     NOT NULL DEFAULT 0,
+    map_description         character varying(150)      NOT NULL DEFAULT '-'::character varying,
+    CONSTRAINT proxy_field_map_pkey PRIMARY KEY (id),
+    CONSTRAINT uk0_proxy_field_map UNIQUE (id_serial),
+    CONSTRAINT uk1_proxy_field_map UNIQUE (proxy_route_id, map_direction, target_field, counter_of_unique_data),
+    CONSTRAINT fk1_proxy_field_map FOREIGN KEY (proxy_route_id) REFERENCES message_proxy.proxy_route (id)
+);
+
+CREATE INDEX IF NOT EXISTS ix1_proxy_field_map ON message_proxy.proxy_field_map (proxy_route_id);
+
+COMMENT ON TABLE  message_proxy.proxy_field_map IS 'Gelen/dönen mesaj alanlarının hedef alan isimleriyle eşleştirmesi';
+COMMENT ON COLUMN message_proxy.proxy_field_map.proxy_route_id IS 'Eşleştirmenin ait olduğu route (proxy_route.id)';
+COMMENT ON COLUMN message_proxy.proxy_field_map.map_direction IS '1: REQUEST - gelen istek gövdesi hedefe giderken, 2: RESPONSE - hedefin cevabı çağırana dönerken';
+COMMENT ON COLUMN message_proxy.proxy_field_map.source_field IS 'Kaynak alan yolu. Nokta ile iç içe, [] ile dizi: customer.name, items[].qty';
+COMMENT ON COLUMN message_proxy.proxy_field_map.target_field IS 'Hedef alan yolu. Kaynakla aynı sayıda [] içermeli: musteri.ad, kalemler[].miktar';
+COMMENT ON COLUMN message_proxy.proxy_field_map.is_required IS '0: Hayır, 1: Evet - kaynakta yoksa ve default_value boşsa istek 400 ile reddedilir';
+COMMENT ON COLUMN message_proxy.proxy_field_map.default_value IS 'Kaynakta alan yoksa yazılacak değer. JSON olarak yorumlanır (10, true, "abc", {}), değilse metin';
+COMMENT ON COLUMN message_proxy.proxy_field_map.field_order IS 'Hedef mesajda alanların yazılma sırası';
+COMMENT ON COLUMN message_proxy.proxy_field_map.map_description IS 'Açıklaması';
 
 -- ---------------------------------------------------------------------
 -- proxy_message_log : İletilen her mesajın istek/cevap kaydı
@@ -94,6 +151,9 @@ CREATE TABLE IF NOT EXISTS message_proxy.proxy_message_log (
     CONSTRAINT fk1_proxy_message_log FOREIGN KEY (proxy_route_id) REFERENCES message_proxy.proxy_route (id)
 );
 
+-- Gelen (eşleştirme öncesi) istek gövdesi; request_body hedefe giden (eşleştirilmiş) gövdedir.
+ALTER TABLE message_proxy.proxy_message_log ADD COLUMN IF NOT EXISTS source_request_body text;
+
 CREATE INDEX IF NOT EXISTS ix1_proxy_message_log ON message_proxy.proxy_message_log (proxy_route_id, date_of_recorded);
 CREATE INDEX IF NOT EXISTS ix2_proxy_message_log ON message_proxy.proxy_message_log (correlation_id);
 CREATE INDEX IF NOT EXISTS ix3_proxy_message_log ON message_proxy.proxy_message_log (date_of_recorded);
@@ -112,5 +172,6 @@ COMMENT ON COLUMN message_proxy.proxy_message_log.response_status IS 'Hedefin HT
 COMMENT ON COLUMN message_proxy.proxy_message_log.response_headers IS 'Hedeften dönen header''lar (hassas olanlar maskelenir)';
 COMMENT ON COLUMN message_proxy.proxy_message_log.response_body IS 'Cevap gövdesi (proxy_route.log_body = 1 ise)';
 COMMENT ON COLUMN message_proxy.proxy_message_log.duration_ms IS 'Hedef çağrısının süresi (ms)';
-COMMENT ON COLUMN message_proxy.proxy_message_log.result_type IS '1: SUCCESS (2xx/3xx), 2: TARGET_ERROR (4xx/5xx), 3: CONNECTION_ERROR (timeout/ulaşılamadı)';
+COMMENT ON COLUMN message_proxy.proxy_message_log.source_request_body IS 'Gelen isteğin eşleştirme öncesi gövdesi (proxy_route.log_body = 1 ise)';
+COMMENT ON COLUMN message_proxy.proxy_message_log.result_type IS '1: SUCCESS (2xx/3xx), 2: TARGET_ERROR (4xx/5xx), 3: CONNECTION_ERROR (timeout/ulaşılamadı), 4: MAPPING_ERROR (alan eşleştirme hatası)';
 COMMENT ON COLUMN message_proxy.proxy_message_log.error_message IS 'Hata mesajı';

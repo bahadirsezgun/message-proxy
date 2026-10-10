@@ -5,8 +5,8 @@ import java.util.Objects;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.databind.JsonNode;
 
-import tools.jackson.databind.JsonNode;
 import tr.com.zenergy.mini_jpa.util.IEnumNumber;
 
 @JsonFormat(shape = JsonFormat.Shape.OBJECT)

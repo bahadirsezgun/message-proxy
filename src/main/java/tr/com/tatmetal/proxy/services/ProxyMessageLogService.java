@@ -16,9 +16,8 @@ import org.springframework.stereotype.Service;
 
 import tr.com.tatmetal.proxy.dao.ProxyMessageLogDaoImpl;
 import tr.com.tatmetal.proxy.entity.ProxyMessageLogEntity;
-import tr.com.tatmetal.proxy.entity.ProxyRouteEntity;
 import tr.com.tatmetal.proxy.enums.ProxyResultEnum;
-import tr.com.tatmetal.proxy.enums.YesNoEnum;
+import tr.com.tatmetal.proxy.model.ProxyRouteDefinition;
 
 @Service
 public class ProxyMessageLogService {
@@ -63,29 +62,50 @@ public class ProxyMessageLogService {
      * Bir iletimin kaydını yazar. Log yazımındaki hata asla iletimi bozmamalıdır;
      * bu yüzden tüm hatalar yakalanır ve sadece uygulama loguna düşülür.
      */
-    public void record(ProxyRouteEntity route, String correlationId, String clientIp,
+    public void record(ProxyRouteDefinition route, String targetUrl, String correlationId, String clientIp,
                        String requestMethod, String requestPath,
-                       Map<String, String> requestHeaders, byte[] requestBody,
+                       Map<String, String> requestHeaders, byte[] sourceRequestBody, byte[] requestBody,
                        int responseStatus, Map<String, ? extends Collection<String>> responseHeaders,
                        byte[] responseBody, long durationMs, String errorMessage) {
+        write(route, targetUrl, correlationId, clientIp, requestMethod, requestPath, requestHeaders,
+                sourceRequestBody, requestBody, responseStatus, responseHeaders, responseBody, durationMs,
+                errorMessage, ProxyResultEnum.fromHttpStatus(responseStatus));
+    }
+
+    /** Alan eşleştirme hatası kaydı (istek hedefe gönderilmeden reddedildiğinde veya cevap eşleştirilemediğinde). */
+    public void recordMappingError(ProxyRouteDefinition route, String targetUrl, String correlationId,
+                                   String clientIp, String requestMethod, String requestPath,
+                                   Map<String, String> requestHeaders, byte[] sourceRequestBody,
+                                   int responseStatus, byte[] responseBody, String errorMessage) {
+        write(route, targetUrl, correlationId, clientIp, requestMethod, requestPath, requestHeaders,
+                sourceRequestBody, null, responseStatus, null, responseBody, 0, errorMessage,
+                ProxyResultEnum.MAPPING_ERROR);
+    }
+
+    private void write(ProxyRouteDefinition route, String targetUrl, String correlationId, String clientIp,
+                       String requestMethod, String requestPath,
+                       Map<String, String> requestHeaders, byte[] sourceRequestBody, byte[] requestBody,
+                       int responseStatus, Map<String, ? extends Collection<String>> responseHeaders,
+                       byte[] responseBody, long durationMs, String errorMessage, ProxyResultEnum resultType) {
         try {
-            boolean logBody = route.getLogBody() == null || route.getLogBody() == YesNoEnum.YES;
+            boolean logBody = route.isLogBody();
 
             ProxyMessageLogEntity log = new ProxyMessageLogEntity();
             log.setProxyRouteId(route.getId());
             log.setRouteCode(route.getRouteCode());
-            log.setCorrelationId(correlationId);
+            log.setCorrelationId(defaultIfBlank(correlationId));
             log.setClientIp(defaultIfBlank(clientIp));
             log.setRequestMethod(requestMethod);
             log.setRequestPath(truncate(defaultIfBlank(requestPath), 1000));
-            log.setTargetUrl(truncate(route.getTargetUrl(), 1000));
+            log.setTargetUrl(truncate(defaultIfBlank(targetUrl), 1000));
             log.setRequestHeaders(singleValueHeadersToText(requestHeaders));
+            log.setSourceRequestBody(logBody ? bodyToText(sourceRequestBody) : null);
             log.setRequestBody(logBody ? bodyToText(requestBody) : null);
             log.setResponseStatus(responseStatus);
             log.setResponseHeaders(multiValueHeadersToText(responseHeaders));
             log.setResponseBody(logBody ? bodyToText(responseBody) : null);
             log.setDurationMs(durationMs);
-            log.setResultType(ProxyResultEnum.fromHttpStatus(responseStatus));
+            log.setResultType(resultType);
             log.setErrorMessage(truncate(defaultIfBlank(errorMessage), maxErrorLength));
 
             proxyMessageLogDao.save(log);

@@ -23,6 +23,7 @@ public class ProxyMessageLogEntity extends BaseEntity {
     @Column(name = "request_path") private String requestPath;
     @Column(name = "target_url") private String targetUrl;
     @Column(name = "request_headers") private String requestHeaders;
+    @Column(name = "source_request_body") private String sourceRequestBody;
     @Column(name = "request_body") private String requestBody;
     @Column(name = "response_status") private int responseStatus;
     @Column(name = "response_headers") private String responseHeaders;
@@ -97,6 +98,14 @@ public class ProxyMessageLogEntity extends BaseEntity {
 
     public void setRequestHeaders(String requestHeaders) {
         this.requestHeaders = requestHeaders;
+    }
+
+    public String getSourceRequestBody() {
+        return sourceRequestBody;
+    }
+
+    public void setSourceRequestBody(String sourceRequestBody) {
+        this.sourceRequestBody = sourceRequestBody;
     }
 
     public String getRequestBody() {
