@@ -61,6 +61,16 @@ public class SwaggerDocLoader {
      * @return en az bir doküman; bulunamazsa {@link IllegalStateException}
      */
     public List<SwaggerDocument> load(String swaggerUrl) {
+        return load(swaggerUrl, Map.of());
+    }
+
+    /**
+     * @param extraHeaders her doküman isteğine eklenecek header'lar (ör. Authorization: Bearer ...).
+     *                     swagger-config ve grup dokümanları dahil tüm isteklere eklenir.
+     * @return en az bir doküman; bulunamazsa {@link IllegalStateException}. Denemelerden biri 401/403 döndüyse
+     *         {@link SwaggerUnauthorizedException} (çağıran token'ı yenileyip tekrar deneyebilir).
+     */
+    public List<SwaggerDocument> load(String swaggerUrl, Map<String, String> extraHeaders) {
         if (swaggerUrl == null || swaggerUrl.isBlank()) {
             throw new IllegalArgumentException("swagger_url boş olamaz");
         }
@@ -68,7 +78,7 @@ public class SwaggerDocLoader {
         if (input.getScheme() == null || input.getHost() == null) {
             throw new IllegalArgumentException("swagger_url tam adres olmalı (http://... ya da https://...): " + swaggerUrl);
         }
-        Attempts attempts = new Attempts();
+        Attempts attempts = new Attempts(extraHeaders);
 
         // 1) swagger-ui adresinde ?url= / ?configUrl= varsa doğrudan onu kullan
         Map<String, String> query = parseQuery(input.getRawQuery());
@@ -101,7 +111,7 @@ public class SwaggerDocLoader {
 
         // Sunucuya hiç ulaşılamıyorsa diğer adresleri denemek boşuna (her biri timeout bekletir)
         if (attempts.unreachable) {
-            throw new IllegalStateException("Swagger adresine ulaşılamadı: " + attempts);
+            throw attempts.fail("Swagger adresine ulaşılamadı: " + attempts);
         }
 
         // 3) swagger-ui sayfası (HTML) ya da servis kök adresi: standart doküman adreslerini dene
@@ -123,7 +133,7 @@ public class SwaggerDocLoader {
             }
         }
 
-        throw new IllegalStateException("Swagger/OpenAPI dokümanı bulunamadı. Denenen adresler: " + attempts);
+        throw attempts.fail("Swagger/OpenAPI dokümanı bulunamadı. Denenen adresler: " + attempts);
     }
 
     // ------------------------------------------------------------------
@@ -143,7 +153,7 @@ public class SwaggerDocLoader {
                 URI specUri = configUri.resolve(url);
                 JsonNode spec = fetch(specUri, attempts);
                 if (spec == null || !isSpec(spec)) {
-                    throw new IllegalStateException("Grup dokümanı okunamadı. grup=" + group
+                    throw attempts.fail("Grup dokümanı okunamadı. grup=" + group
                             + ", adres=" + specUri + ", denemeler: " + attempts);
                 }
                 result.add(new SwaggerDocument(group.isBlank() ? NO_GROUP : group, specUri, spec));
@@ -152,7 +162,7 @@ public class SwaggerDocLoader {
             URI specUri = configUri.resolve(config.get("url").asText());
             JsonNode spec = fetch(specUri, attempts);
             if (spec == null || !isSpec(spec)) {
-                throw new IllegalStateException("Doküman okunamadı. adres=" + specUri + ", denemeler: " + attempts);
+                throw attempts.fail("Doküman okunamadı. adres=" + specUri + ", denemeler: " + attempts);
             }
             result.add(new SwaggerDocument(NO_GROUP, specUri, spec));
         }
@@ -171,6 +181,7 @@ public class SwaggerDocLoader {
         try {
             Map<String, String> headers = new LinkedHashMap<>();
             headers.put("Accept", "application/json, application/yaml;q=0.9, */*;q=0.8");
+            headers.putAll(attempts.extraHeaders);
             ResponseEntity<byte[]> response = swaggerDocClient.get(uri, options, headers);
             if (!response.getStatusCode().is2xxSuccessful()) {
                 attempts.add(uri, "HTTP " + response.getStatusCodeValue());
@@ -183,7 +194,12 @@ public class SwaggerDocLoader {
             if (e.status() <= 0) {
                 attempts.unreachable = true;
             }
-            attempts.add(uri, e.status() > 0 ? "HTTP " + e.status() : "ulaşılamadı (" + rootMessage(e) + ")");
+            if (e.status() == 401 || e.status() == 403) {
+                attempts.unauthorized = true;
+                attempts.add(uri, "HTTP " + e.status() + " (yetkisiz)");
+            } else {
+                attempts.add(uri, e.status() > 0 ? "HTTP " + e.status() : "ulaşılamadı (" + rootMessage(e) + ")");
+            }
             logger.debug("Swagger adresi okunamadı. uri={}, error={}", uri, e.toString());
             return null;
         } catch (Exception e) {
@@ -293,8 +309,28 @@ public class SwaggerDocLoader {
     /** Hata mesajında hangi adreslerin denendiğini göstermek için. */
     private static final class Attempts {
         private final Map<String, String> results = new LinkedHashMap<>();
+        /** Her isteğe eklenecek header'lar (değerleri hata mesajına yazılmaz). */
+        private final Map<String, String> extraHeaders;
         /** Bağlantı kurulamadı / timeout (HTTP cevabı hiç alınamadı). */
         private boolean unreachable;
+        /** En az bir adres 401 / 403 döndü. */
+        private boolean unauthorized;
+
+        Attempts(Map<String, String> extraHeaders) {
+            this.extraHeaders = extraHeaders == null ? Map.of() : extraHeaders;
+        }
+
+        /** 401/403 görüldüyse {@link SwaggerUnauthorizedException}, aksi halde {@link IllegalStateException}. */
+        IllegalStateException fail(String message) {
+            if (!unauthorized) {
+                return new IllegalStateException(message);
+            }
+            boolean hasAuthorization = extraHeaders.keySet().stream().anyMatch("Authorization"::equalsIgnoreCase);
+            return new SwaggerUnauthorizedException(message + (hasAuthorization
+                    ? " — Gönderilen token kabul edilmedi (süresi dolmuş ya da yetkisi yok)."
+                    : " — Swagger dokümanı yetki istiyor; kaynağa bir token tanımı bağlayın (authProfileId)."),
+                    hasAuthorization);
+        }
 
         void add(URI uri, String result) {
             results.put(uri.toString(), result);

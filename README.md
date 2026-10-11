@@ -7,7 +7,8 @@ Gelen REST isteklerini, veritabanında tanımlı kurallara göre başka bir sist
 - Route ve eşleştirme tanımları PostgreSQL'de tutulur. Uygulama açılışta bunları **Redis**'e yükler, isteklerde sadece Redis'ten okur.
 - Hedefin cevabı (status, header, gövde) isteği gönderen sisteme aynen döner.
 - Her iletim `proxy_message_log` tablosuna kaydedilir.
-- Ayrıca entegre olunan servislerin **swagger dokümanları okunup** tüm endpoint'leri `swagger_endpoint` tablosuna yazılır ve güncel tutulur (bkz. [Swagger'dan endpoint senkronizasyonu](#swaggerdan-endpoint-senkronizasyonu)).
+- Entegre olunan uygulamalar `app_registry`'de tanımlanır (ad, amaç, adres, base path, swagger). Route'lar ve swagger kaynakları uygulamaya bağlanır; "hangi uygulama kimlerle entegre" bilgisi route'lardan çıkarılır (bkz. [Uygulama kaydı](#uygulama-kaydı-app_registry)).
+- Ayrıca entegre olunan servislerin **swagger dokümanları okunup** tüm endpoint'leri `swagger_endpoint` tablosuna yazılır ve güncel tutulur; token korumalı dokümanlar için token `auth_profile` tanımına göre otomatik alınır (bkz. [Swagger'dan endpoint senkronizasyonu](#swaggerdan-endpoint-senkronizasyonu)).
 
 ---
 
@@ -22,14 +23,15 @@ Gelen REST isteklerini, veritabanında tanımlı kurallara göre başka bir sist
 7. [Redis önbellek](#redis-önbellek)
 8. [Route eşleşme kuralları](#route-eşleşme-kuralları)
 9. [Alan eşleştirme (mapping)](#alan-eşleştirme-mapping)
-10. [Swagger'dan endpoint senkronizasyonu](#swaggerdan-endpoint-senkronizasyonu)
-11. [REST API referansı](#rest-api-referansı)
-12. [Hata cevapları](#hata-cevapları)
-13. [Loglama](#loglama)
-14. [Konfigürasyon](#konfigürasyon)
-15. [Yeni bir entegrasyon tanımlama (adım adım)](#yeni-bir-entegrasyon-tanımlama-adım-adım)
-16. [Geliştirici notları](#geliştirici-notları)
-17. [Sorun giderme](#sorun-giderme)
+10. [Uygulama kaydı (app_registry)](#uygulama-kaydı-app_registry)
+11. [Swagger'dan endpoint senkronizasyonu](#swaggerdan-endpoint-senkronizasyonu)
+12. [REST API referansı](#rest-api-referansı)
+13. [Hata cevapları](#hata-cevapları)
+14. [Loglama](#loglama)
+15. [Konfigürasyon](#konfigürasyon)
+16. [Yeni bir entegrasyon tanımlama (adım adım)](#yeni-bir-entegrasyon-tanımlama-adım-adım)
+17. [Geliştirici notları](#geliştirici-notları)
+18. [Sorun giderme](#sorun-giderme)
 
 ---
 
@@ -109,7 +111,7 @@ Adım adım:
 |---|---|---|---|
 | 1 | `/proxy` prefix'i çıkarılır, kalan path bulunur | `ProxyGatewayResources` | — |
 | 2 | Path + metot ile route Redis'ten bulunur | `ProxyRouteCacheService` | 404 `ROUTE_NOT_FOUND` |
-| 3 | Hedef URL hazırlanır (`{id}` değişkenleri + query string) | `ProxyGatewayService` | 500 `INVALID_TARGET_URL` |
+| 3 | Hedef URL hazırlanır (`{id}` değişkenleri + query string). Göreli `target_url` Redis yüklemesinde hedef uygulamanın adresiyle çözülmüştür | `ProxyGatewayService` | 500 `INVALID_TARGET_URL` |
 | 4 | REQUEST eşleştirmeleri gövdeye uygulanır | `ProxyFieldMappingService` | 400 `REQUEST_MAPPING_ERROR` |
 | 5 | İstek hedefe iletilir | `ProxyForwardService` + `ProxyForwardClient` | 502 / 504 |
 | 6 | İletim loglanır | `ProxyMessageLogService` | Log hatası iletimi bozmaz |
@@ -135,6 +137,8 @@ tr.com.tatmetal.proxy
 ├── exception                        Uygulama exception'ları (standart dışı ek paket)
 ├── client                           OpenFeign client'ları   (standart dışı ek paket)
 ├── swagger                          Swagger dokümanı okuma/parse (standart dışı ek paket)
+├── auth                             Token şifreleme ve sonuç sınıfları (standart dışı ek paket)
+├── app                              Uygulama genel bakış (entegrasyon haritası) cevap sınıfları (standart dışı ek paket)
 └── config                           Spring konfigürasyonları (standart dışı ek paket)
 ```
 
@@ -171,7 +175,7 @@ Proxy'nin **giriş kapısı**. `${proxy.gateway.prefix}/**` (varsayılan `/proxy
 - İşin geri kalanını `ProxyGatewayService.handle(...)`'a devreder.
 
 #### `ProxyRouteResources`
-`/api/v1/proxy-route`: route tanımlarının CRUD işlemleri ve Redis önbellek yönetimi. Her kayıt değişikliğinden sonra Redis otomatik yenilenir. Uç noktalar için [REST API referansı](#rest-api-referansı)'na bakın.
+`/api/v1/proxy-route`: route tanımlarının CRUD işlemleri ve Redis önbellek yönetimi. Doğrulama hataları (ör. göreli `targetUrl` için hedef uygulama yok) 400 `VALIDATION_ERROR` döner. Her kayıt değişikliğinden sonra Redis otomatik yenilenir. Uç noktalar için [REST API referansı](#rest-api-referansı)'na bakın.
 
 #### `ProxyFieldMapResources`
 `/api/v1/proxy-field-map`: alan eşleştirme tanımlarının CRUD işlemleri.
@@ -185,6 +189,12 @@ Proxy'nin **giriş kapısı**. `${proxy.gateway.prefix}/**` (varsayılan `/proxy
 `/api/v1/swagger-source`: swagger kaynaklarının CRUD işlemleri ve elle senkronizasyon (`/{id}/sync`, `/sync`).
 - `IllegalArgumentException` (eksik `sourceCode`, geçersiz `swaggerUrl`) yakalanır ve **400** `{"message": "..."}` döner.
 - `/{id}/sync` kaynak yoksa veya CANCELLED ise 404 döner.
+
+#### `AppRegistryResources`
+`/api/v1/app-registry`: uygulamaların CRUD işlemleri, `/{id}/sync`, `/{id}/overview`, `/overview`. `IllegalArgumentException` 400 `{"message": "..."}` döner.
+
+#### `AuthProfileResources`
+`/api/v1/auth-profile`: token tanımlarının CRUD işlemleri ve `/{id}/test`. `password` / `clientSecret` cevaplarda hiç dönmez; `IllegalArgumentException` 400 `{"message": "..."}` olarak döner.
 
 #### `SwaggerEndpointResources`
 `/api/v1/swagger-endpoint`: okunan endpoint'leri sorgular. Ekleme ve silme yoktur; `PUT` sadece `status`'u (ör. PASSIVE) değiştirmek için kullanılır.
@@ -214,6 +224,7 @@ Route + eşleştirme tanımlarının **Redis önbelleğini** yönetir.
 - **`find(method, path)`**: route'u Redis'ten bulur. Sıralama için [Route eşleşme kuralları](#route-eşleşme-kuralları)'na bakın. Sonuç `ProxyRouteMatch` olarak döner: route ve path değişkenleri.
 - **`ensureLoaded()`**: Redis'te `{prefix}:loaded-at` anahtarı yoksa (Redis yeniden başladı ya da temizlendi) tanımları DB'den otomatik yeniden yükler.
 - **`getAll()`**: Redis'teki tüm tanımları döner. İzleme amaçlı kullanılır.
+- **`resolveTargetUrl(targetUrl, hedefUygulama)`** (static): mutlak adresi olduğu gibi, göreli adresi uygulamanın tam adresiyle birleştirerek döner; çözülemiyorsa `null`. `reload()` göreli adresleri bununla çözer, çözülemeyen route'u yüklemez.
 - **`normalizePath(path)`** (static): path'in başına `/` ekler, sonundaki `/`'ı kaldırır. Kayıt sırasında da kullanılır, böylece `erp/order/` ve `/erp/order` aynı route'a gider.
 
 #### `ProxyFieldMappingService`
@@ -251,6 +262,7 @@ Eşleştirmesi yapılmış isteği **hedefe iletir** ve iletimi loglar. Tablodan
 #### `ProxyRouteService`
 `proxy_route` için CRUD.
 - Kayıt öncesi `source_path`'i normalize eder.
+- `targetAppRegistryId` / `sourceAppRegistryId` verildiyse uygulamanın var olduğunu kontrol eder; göreli `targetUrl` için `targetAppRegistryId` zorunludur.
 - Her değişiklikten sonra `ProxyRouteCacheService.reload()` çağırır. Redis hatası kaydı geri almaz, sadece loglanır.
 
 #### `ProxyFieldMapService`
@@ -266,6 +278,28 @@ Swagger senkronizasyonunun **orkestratörü**. Tablodan bağımsızdır.
 - Transaction `exDb` üzerinde `TransactionTemplate` ile açılır. HTTP okuma transaction dışındadır.
 - Kilit alınamazsa (başka senkronizasyon sürüyor) `skipped = true` döner ve `swagger_source`'a yazmaz.
 - Yazan kullanıcı olarak `user_who_recorded` / `user_who_last_updated` alanlarına `swagger-sync` yazılır.
+- Kaynağa `auth_profile_id` bağlıysa dokümanları `Authorization` header'ı ile okur; `SwaggerUnauthorizedException` gelirse token'ı yenileyip bir kez daha dener.
+
+#### `AuthTokenService`
+Token alır ve `Authorization` değerini üretir. Tablodan bağımsızdır.
+- **`getAuthorizationHeader(tanım)`**: bellekte geçerli token varsa onu, yoksa `AuthTokenClient` ile yenisini alır (`Bearer <token>`). Aynı tanım için eşzamanlı istekler tek token isteğine düşer.
+- **`invalidate(id)`**: bellekteki token'ı siler.
+- **`test(tanım)`**: bellek kullanmadan token almayı dener, `AuthTokenTestResult` döner.
+- Gövdeyi tanımın alanlarından kurar, `custom_headers_json`'u header olarak ekler, `token_field` / `expires_field` yollarını okur. Hata durumunda `AuthTokenException` fırlatır; mesajda gizli değer bulunmaz.
+
+#### `AuthProfileService`
+`auth_profile` için CRUD.
+- Doğrulama: `profileCode`, `tokenUrl` (`http(s)://`) zorunlu; `tokenMethod` POST/PUT; `customHeadersJson` / `extraBodyJson` JSON nesnesi olmalı. Boş alanlara tablo varsayılanlarını yazar.
+- `password` / `clientSecret`: gelen değer şifrelenir; güncellemede boş gelirse eski değer korunur, `-` gelirse silinir. Anahtar yoksa şifre içeren kayıt reddedilir.
+- `update` / `delete` sonrası bellekteki token silinir.
+
+#### `AppRegistryService`
+`app_registry` CRUD ve uygulamaya bağlı kayıtların yönetimi.
+- Doğrulama ve normalizasyon: `appCode`, `appName`, `baseUrl` (`http(s)://`) zorunlu; `base_path` / `swagger_path` biçimlenir; `authProfileId` kontrol edilir; swagger kod çakışması kayıttan **önce** kontrol edilir.
+- **`save` / `update`**: swagger kaynağını oluşturur / günceller / PASSIVE yapar (bkz. [Swagger kaynağının yönetimi](#swagger-kaynağının-yönetimi)); `update` sonrası Redis'i yeniler.
+- **`delete`**: bağlı route yoksa `status = CANCELLED` yapar (fiziksel silme yok), swagger kaynağını PASSIVE yapar, Redis'i yeniler.
+- **`sync(id)`**: uygulamanın swagger'ını hemen senkronize eder.
+- **`overview(id)` / `overviewAll()`**: uygulama + swagger durumu + `outgoing` / `incoming` entegrasyonlar.
 
 #### `SwaggerSyncScheduler`
 Otomatik senkronizasyon. `swagger.sync.enabled=false` ise bean hiç oluşmaz.
@@ -275,9 +309,10 @@ Otomatik senkronizasyon. `swagger.sync.enabled=false` ise bean hiç oluşmaz.
 
 #### `SwaggerSourceService`
 `swagger_source` için CRUD.
-- Kayıt öncesi `sourceCode` ve `swaggerUrl` zorunluluğunu, `swaggerUrl`'in `http(s)://` ile başladığını kontrol eder; boş alanlara tablo varsayılanlarını (`-`, `autoSync = 1`, `lastSyncResult = NEVER`) yazar.
+- Kayıt öncesi `sourceCode` ve `swaggerUrl` zorunluluğunu, `swaggerUrl`'in `http(s)://` ile başladığını, `authProfileId` verildiyse tanımın var olduğunu kontrol eder; boş alanlara tablo varsayılanlarını (`-`, `autoSync = 1`, `lastSyncResult = NEVER`) yazar.
 - **`save`**: kayıttan sonra `autoSync` 0 değilse hemen senkronize eder ve kaydı son hâliyle (`lastSync*` dolu) döner. Okuma hatası kaydı engellemez.
 - `saveAll` ve `update` senkronizasyon başlatmaz.
+- Uygulamaya bağlı kaynakta kod / adres / token alanlarının değiştirilmesini ve API'den `appRegistryId` verilmesini reddeder. `saveForApp` / `updateForApp` bu kuralı uygulamayan, sadece `AppRegistryService`'in kullandığı metotlardır.
 
 #### `SwaggerEndpointService`
 `swagger_endpoint` için okuma (`getOne`, `getByCondition`) ve `update`. Ekleme/silme bilerek yoktur; kayıtları `SwaggerSyncService` yönetir.
@@ -295,6 +330,9 @@ Dinamik hedeflere istek atan **genel Feign client**.
 
 #### `SwaggerDocClient`
 Swagger dokümanlarını okumak için genel Feign client (`get(URI, Request.Options, headers)`). `ProxyForwardClient` gibi hedef adresi `URI` parametresiyle çağrı bazında alır. Timeout'lar `swagger.sync.connect-timeout-ms` / `read-timeout-ms` ile belirlenir. `ProxyFeignConfig`'i kullanır (retry yok).
+
+#### `AuthTokenClient`
+Token isteği için genel Feign client (`post` / `put(URI, Request.Options, headers, byte[] body)`). Hedef adres ve timeout'lar tanımdan çağrı bazında gelir. `ProxyFeignConfig`'i kullanır (retry yok, log seviyesi `BASIC`: sadece metot, adres ve status loglanır; gövde ve header'lar loglanmaz).
 
 Sabit adresli başka bir sisteme çağrı gerekirse bu paketa ayrı bir `@FeignClient(name = "...", url = "${...}")` eklenmelidir.
 
@@ -331,6 +369,8 @@ Tüm entity'ler `mini_jpa` `BaseEntity`'den extend eder. Standart alanlar (`id`,
 | `ProxyMessageLogEntity` | `proxy_message_log` | İletim kaydı. `toString()` gövde ve header'ları bilerek yazmaz. |
 | `SwaggerSourceEntity` | `swagger_source` | Swagger adresi okunacak servis ve son senkronizasyon sonucu |
 | `SwaggerEndpointEntity` | `swagger_endpoint` | Swagger'dan okunan endpoint. `toString()` JSON kolonlarını yazmaz. |
+| `AppRegistryEntity` | `app_registry` | Entegre olunan uygulama. `fullBaseUrl` ve `swaggerUrl` hesaplanan, salt okunur JSON alanlarıdır. |
+| `AuthProfileEntity` | `auth_profile` | Token alma tanımı. `password` / `clientSecret` JSON'da sadece yazılabilir (cevapta yok), `passwordSet` / `clientSecretSet` okunabilir. `toString()` gizli alanları ve `extraBodyJson`'u yazmaz. |
 
 Kolon detayları için [Veritabanı tabloları](#veritabanı-tabloları) bölümüne bakın.
 
@@ -343,7 +383,7 @@ Her Dao `@Repository`'dir ve `exdbJdbcTemplate` kullanır. Standart metotlar:
 | Metot | Açıklama |
 |---|---|
 | `save`, `saveAll`, `update` | `@ExtendsBaseEntity` ile standart alanlar otomatik doldurulur |
-| `delete` | `mini_jpa` delete; standarda göre kayıt silinmez, `status = 1 (CANCELLED)` yapılır |
+| `delete` | `mini_jpa` delete: kaydı **fiziksel olarak siler** (`DELETE FROM ... WHERE id AND etag`). Standarttaki iptal için `update` ile `status = 1` kullanın |
 | `getOne(id, etag)` | Tek kayıt |
 | `getByCondition(params)` | `ParamsToCondition` ile dinamik WHERE. Örnek: `{"routeCode": "ERP_ORDER"}` |
 
@@ -357,6 +397,12 @@ Ek metotlar:
 | `SwaggerSourceDaoImpl` | `getById(id)` | `SwaggerSourceSql.SWAGGER_SOURCE_GET_BY_ID_SQL` | etag'siz tekil okuma, CANCELLED hariç |
 | `SwaggerSourceDaoImpl` | `getAutoSyncSources()` | `SwaggerSourceSql.SWAGGER_SOURCE_GET_AUTO_SYNC_SQL` | `status = 3` ve `auto_sync = 1` |
 | `SwaggerSourceDaoImpl` | `updateSyncResult(...)` | `SwaggerSourceSql.SWAGGER_SOURCE_UPDATE_SYNC_RESULT_SQL` | `last_sync_*` ve `endpoint_count` yazar; etag'e dokunmaz, `endpoint_count` null gelirse eskisini korur |
+| `AppRegistryDaoImpl` | `getById(id)` | `AppRegistrySql.APP_REGISTRY_GET_BY_ID_SQL` | etag'siz tekil okuma, CANCELLED hariç |
+| `AppRegistryDaoImpl` | `getNotCancelledList()` | `AppRegistrySql.APP_REGISTRY_GET_NOT_CANCELLED_SQL` | İptal edilmemiş tüm uygulamalar; hata durumunda exception (Redis'e eksik adres yazılmasın) |
+| `ProxyRouteDaoImpl` | `getByAppRegistryId(id)` | `ProxyRouteSql.PROXY_ROUTE_GET_BY_APP_SQL` | Uygulamayı çağıran ya da ona giden, iptal edilmemiş route'lar |
+| `ProxyRouteDaoImpl` | `getAppLinkedList()` | `ProxyRouteSql.PROXY_ROUTE_GET_APP_LINKED_SQL` | Herhangi bir uygulamaya bağlı tüm route'lar (harita) |
+| `SwaggerSourceDaoImpl` | `getByAppRegistryId(id)` / `getBySourceCode(code)` | `SWAGGER_SOURCE_GET_BY_APP_SQL` / `SWAGGER_SOURCE_GET_BY_CODE_SQL` | Uygulamanın kaynağı / aynı kodlu kaynak (sahiplenme için); CANCELLED hariç |
+| `AuthProfileDaoImpl` | `getById(id)` | `AuthProfileSql.AUTH_PROFILE_GET_BY_ID_SQL` | etag'siz tekil okuma, CANCELLED hariç |
 | `SwaggerEndpointDaoImpl` | `currentSyncTime()` | `SwaggerEndpointSql.SWAGGER_ENDPOINT_SYNC_TIME_SQL` | Veritabanı saati (`LOCALTIMESTAMP`) |
 | `SwaggerEndpointDaoImpl` | `tryLockSource(id)` | `SwaggerEndpointSql.SWAGGER_ENDPOINT_TRY_LOCK_SQL` | Kaynak bazlı transaction kilidi (`pg_try_advisory_xact_lock`) |
 | `SwaggerEndpointDaoImpl` | `upsert(...)` | `SwaggerEndpointSql.SWAGGER_ENDPOINT_UPSERT_SQL` | `INSERT ... ON CONFLICT uk1 DO UPDATE`; `INSERTED` / `UPDATED` / `UNCHANGED` döner |
@@ -366,7 +412,7 @@ Ek metotlar:
 
 Swagger Dao'larındaki `upsert`, `cancelMissing`, `tryLockSource` ve `updateSyncResult` entity'ye bağlı olmayan SQL'ler olduğu için `exDb` üzerinde Spring `NamedParameterJdbcTemplate` ile çalışır; `upsert`, `cancelMissing` ve `tryLockSource` transaction içinde çağrılmalıdır.
 
-`*Sql` sınıfları (`ProxyRouteSql`, `ProxyFieldMapSql`, `ProxyMessageLogSql`, `SwaggerSourceSql`, `SwaggerEndpointSql`) sadece `public static final String` SQL sabitleri içerir.
+`*Sql` sınıfları (`ProxyRouteSql`, `ProxyFieldMapSql`, `ProxyMessageLogSql`, `SwaggerSourceSql`, `SwaggerEndpointSql`, `AuthProfileSql`, `AppRegistrySql`) sadece `public static final String` SQL sabitleri içerir.
 
 ---
 
@@ -380,6 +426,25 @@ Veritabanına dokunmayan, swagger dokümanını bulma ve çözümleme sınıflar
 | `SwaggerSpecParser` | **`parse(document, baseUrlOverride)`**: OpenAPI 3.x / Swagger 2.0 dokümanını `SwaggerEndpointEntity` listesine çevirir (`swaggerSourceId` hariç). Kurallar için [Endpoint'e dönüştürme](#endpointe-dönüştürme)'ye bakın. |
 | `SwaggerDocument` | Okunmuş doküman: grup adı, okunduğu adres (göreli `servers` adreslerini çözmek için) ve JSON kökü. |
 | `SwaggerSyncResult` | Bir kaynağın senkronizasyon özeti; API cevabı olarak döner. Alanlar için [Senkronizasyon sonucu](#senkronizasyon-sonucu)'na bakın. |
+| `SwaggerUnauthorizedException` | Doküman bulunamadı ve denemelerden biri 401/403 döndü. `isTokenSent()` istekte token olup olmadığını söyler. |
+
+### `auth` — Token yardımcı sınıfları
+
+| Sınıf | Açıklama |
+|---|---|
+| `AuthSecretCipher` | `password` / `client_secret` için AES-256-GCM şifreleme. Biçim `enc:v1:<base64(IV + şifreli metin + tag)>`; `enc:v1:` ile başlamayan değeri düz metin kabul eder. Anahtar `auth.profile.secret-key`. |
+| `AuthTokenException` | Token alınamadı. `getHttpStatus()` token servisinin status'u (ulaşılamadıysa 0). Mesajda gizli değer yoktur. |
+| `AuthTokenTestResult` | `/api/v1/auth-profile/{id}/test` cevabı: `success`, `httpStatus`, `message`, `tokenPreview` (ilk 10 karakter), `expiresInSeconds`, `durationMs`. |
+
+---
+
+### `app` — Uygulama genel bakış nesneleri
+
+| Sınıf | Açıklama |
+|---|---|
+| `AppOverview` | `app`, `swaggerSource`, `outgoing`, `incoming` |
+| `AppIntegration` | Karşı uygulama (`appRegistryId`, `appCode`, `appName`), `routeCount`, `routes` |
+| `AppRouteLink` | Route özeti: `routeCode`, `sourceMethod` (`ANY` = tüm metotlar), `sourcePath`, `targetUrl`, `resolvedTargetUrl`, `status` |
 
 ---
 
@@ -401,11 +466,12 @@ Hepsi `IEnumNumber` uygular ve DB'de `smallint` olarak saklanır. JSON'da hem `i
 
 | Enum | Değerler | Kullanıldığı yer |
 |---|---|---|
-| `HttpMethodEnum` | 0 `PASS_THROUGH`, 1 `GET`, 2 `POST`, 3 `PUT`, 4 `PATCH`, 5 `DELETE` | `proxy_route.source_method` (0 = tüm metotlar), `proxy_route.target_method` (0 = gelen metot) |
+| `HttpMethodEnum` | 0 `PASS_THROUGH`, 1 `GET`, 2 `POST`, 3 `PUT`, 4 `PATCH`, 5 `DELETE` | `proxy_route.source_method` (0 = tüm metotlar), `proxy_route.target_method` (0 = gelen metot), `auth_profile.token_method` (sadece 2, 3) |
 | `MapDirectionEnum` | 1 `REQUEST`, 2 `RESPONSE` | `proxy_field_map.map_direction` |
 | `YesNoEnum` | 0 `NO`, 1 `YES` (JSON'da `true`/`false` da kabul edilir) | `log_body`, `pass_unmapped_fields`, `is_required`, `auto_sync`, `deprecated` |
 | `ProxyResultEnum` | 1 `SUCCESS`, 2 `TARGET_ERROR`, 3 `CONNECTION_ERROR`, 4 `MAPPING_ERROR` | `proxy_message_log.result_type` |
 | `SyncResultEnum` | 0 `NEVER`, 1 `SUCCESS`, 2 `ERROR` | `swagger_source.last_sync_result`, `SwaggerSyncResult.result` |
+| `TokenContentTypeEnum` | 1 `JSON`, 2 `FORM` | `auth_profile.content_type` |
 
 ---
 
@@ -428,9 +494,30 @@ Hepsi `IEnumNumber` uygular ve DB'de `smallint` olarak saklanır. JSON'da hem `i
   - `uk0_<tablo> UNIQUE (id_serial)`
   - İş anahtarı: `ukN_<tablo> UNIQUE (<alanlar>, counter_of_unique_data)`
   - Yabancı anahtar: `fkN_<tablo> FOREIGN KEY (...) REFERENCES message_proxy.<tablo>(id)`
-- `status` değerleri: 1 CANCELLED, 2 PASSIVE, 3 ACTIVE, 4 CLOSED. Kayıt silinmez; `status = 1` yapılır ve `counter_of_unique_data` `message_proxy.counter_of_unique_data_seq` ile artırılır.
+- `status` değerleri: 1 CANCELLED, 2 PASSIVE, 3 ACTIVE, 4 CLOSED. Standarda göre kayıt silinmez; `status = 1` yapılır ve `counter_of_unique_data` bir sequence ile artırılır:
+  - `mini_jpa` `update` ile `status = 1` yapılan kayıtlarda: `message_proxy.system_table_uniqueless_control_seq` (`BaseEntity`'deki `@Sequence`; `schema.sql` oluşturur).
+  - Swagger senkronizasyonunun CANCELLED yaptığı endpoint'lerde: `message_proxy.counter_of_unique_data_seq`.
+- **Dikkat:** `mini_jpa`'nın `delete` metodu kaydı **fiziksel olarak siler** (`DELETE FROM`). `DELETE` uç noktaları bu yüzden kaydı siler; bağlı kayıt varsa FK hatası alınır. Standarttaki davranış için kaydı `PUT` ile `status = 1` yaparak iptal edin. `app_registry` silme işlemi bunu kendisi yapar (CANCELLED).
 
 Aşağıdaki tablolarda `<BASE_COLUMNS>` dışındaki tüm kolonlar anlatılır. Çalışma anında kullanılmayan, sadece bilgi amaçlı kolonlar ayrıca belirtilmiştir.
+
+### `app_registry` — Uygulamalar
+
+Her satır, proxy'nin konuştuğu bir uygulamadır. Süreç ve kurallar için [Uygulama kaydı](#uygulama-kaydı-app_registry) bölümüne bakın.
+
+| Kolon | Tip | Zorunlu / Varsayılan | Açıklama | Örnek / geçerli değerler |
+|---|---|---|---|---|
+| `app_code` | varchar(50) | Zorunlu | Uygulamanın benzersiz kodu (`uk1`). `has_swagger = 1` ise swagger kaynağının `source_code`'u da budur. | `ERP`, `SSO`, `MES` |
+| `app_name` | varchar(150) | Zorunlu | Uygulamanın adı. Swagger kaynağının açıklamasına da yazılır. | `ERP Servisi` |
+| `app_purpose` | text | null | Uygulamanın amacı, ne iş yaptığı. **Sadece bilgi amaçlıdır.** | `Sipariş, stok ve fatura işlemleri` |
+| `app_owner` | varchar(100) | `-` | Sorumlu ekip / kişi. **Sadece bilgi amaçlıdır.** | `ERP ekibi` |
+| `base_url` | varchar(500) | Zorunlu | Şema + host + port. `http://` veya `https://` ile başlamalı; sondaki `/` kayıtta kaldırılır. | `http://localhost:7261`, `https://erp.tatmetal.local` |
+| `base_path` | varchar(200) | `-` | Uygulamanın context path'i. Başına `/` eklenir, sondaki `/` kaldırılır; yoksa `-`. Swagger adresi, `full_url`'ler ve göreli route adresleri bunu kullanır. | `-`, `/erp`, `/sso-service` |
+| `has_swagger` | smallint | 0 | Uygulamanın swagger'ı var mı. 1 ise swagger kaynağı otomatik yönetilir. | 0 Hayır, 1 Evet |
+| `swagger_path` | varchar(300) | `/swagger-ui/index.html` | Swagger'ın **tam adrese göre** yolu (tam adres değil). swagger-ui sayfası ya da doküman adresi olabilir; çözülme kuralları için [Swagger adresinin çözülmesi](#swagger-adresinin-çözülmesi). | `/swagger-ui/index.html`, `/v3/api-docs` |
+| `auth_profile_id` | uuid | null | Swagger dokümanı token istiyorsa kullanılacak tanım (`fk1` → `auth_profile.id`). Swagger kaynağına aktarılır. | `3f1c2b7e-...` |
+
+Anahtarlar: `uk1_app_registry (app_code, counter_of_unique_data)`, `fk1_app_registry (auth_profile_id) → auth_profile(id)`.
 
 ### `proxy_route` — Route tanımları
 
@@ -442,15 +529,18 @@ Her satır bir entegrasyon uç noktasıdır: "şu path'e şu metotla gelen istek
 | `route_description` | varchar(150) | `-` | Route'un ne iş yaptığını anlatan serbest metin. **Sadece bilgi amaçlıdır**, çalışma anında kullanılmaz. | `ERP sipariş oluşturma` |
 | `source_path` | varchar(500) | `-` | İstemcinin çağırdığı path, **`/proxy` ön eki olmadan**. `/` ile başlar, sonda `/` olmaz (API ile kaydederken düzeltilir). Büyük/küçük harfe duyarlıdır. `{ad}` tek bir path parçasını değişken olarak yakalar; `*` ve `**` joker olarak kullanılabilir. **`-` bırakılırsa route Redis'e yüklenmez**, yani hiçbir istekle eşleşmez. | `/erp/order`, `/erp/order/{id}`, `/ifs/{firma}/part/{kod}` |
 | `source_method` | smallint | 0 | Route'un hangi HTTP metoduyla gelen isteği karşıladığı. Aynı path için hem 0 hem belirli metot tanımlıysa belirli metot önceliklidir. | 0 tüm metotlar, 1 GET, 2 POST, 3 PUT, 4 PATCH, 5 DELETE |
-| `target_url` | varchar(500) | Zorunlu | Hedef sistemin tam adresi (şema, host, port, path). `source_path`'teki `{ad}` değişkenleri aynı adla kullanılabilir, değerleri URL-encode edilerek yerine yazılır. Gelen query string sona eklenir (`target_url`'de `?` varsa `&` ile). `source_path`'te olmayan bir değişken kullanılırsa adres geçersiz olur ve istek 500 `INVALID_TARGET_URL` ile döner. | `http://erp.local:8081/api/siparis/{id}` |
+| `target_url` | varchar(500) | Zorunlu | Hedef sistemin tam adresi (şema, host, port, path) **ya da** `target_app_registry_id` doluysa uygulamaya göre göreli yol (`/api/siparis/{id}`). `source_path`'teki `{ad}` değişkenleri aynı adla kullanılabilir, değerleri URL-encode edilerek yerine yazılır. Gelen query string sona eklenir (`target_url`'de `?` varsa `&` ile). `source_path`'te olmayan bir değişken kullanılırsa adres geçersiz olur ve istek 500 `INVALID_TARGET_URL` ile döner. | `http://erp.local:8081/api/siparis/{id}` |
 | `target_method` | smallint | 0 | Hedefe hangi metotla gidileceği. 0 ise gelen metot aynen kullanılır. **1 (GET) seçilirse gövde gönderilmez.** | 0 gelen metot, 1 GET, 2 POST, 3 PUT, 4 PATCH, 5 DELETE |
 | `connect_timeout_ms` | integer | 5000 | Hedefe TCP bağlantısı kurmak için beklenecek en uzun süre (ms). Aşılırsa istemciye 502/504 döner, log'a `CONNECTION_ERROR` yazılır. 0 veya negatif ise 5000 kullanılır. | `3000` |
 | `read_timeout_ms` | integer | 30000 | Bağlantı kurulduktan sonra hedefin cevabı için beklenecek en uzun süre (ms). Aşılırsa istemciye 504 `TARGET_TIMEOUT` döner. 0 veya negatif ise 30000 kullanılır. Uzun süren işlemler için artırın. | `60000` |
 | `log_body` | smallint | 1 | Bu route'un istek/cevap gövdeleri `proxy_message_log`'a yazılsın mı. Büyük veya hassas veri taşıyan route'larda 0 yapın; header, status, süre gibi diğer bilgiler yine loglanır. | 0 Hayır, 1 Evet |
 | `pass_unmapped_fields` | smallint | 1 | `proxy_field_map`'te tanımı olmayan alanlar ne olsun. 1: aynen hedefe aktarılır, sadece eşleştirilen alanların adı/yeri değişir. 0: sadece eşleştirilen alanlar gönderilir, diğerleri atılır. Hem REQUEST hem RESPONSE eşleştirmesine uygulanır. Route'un hiç eşleştirmesi yoksa etkisi yoktur, gövde aynen gider. | 0 Hayır, 1 Evet |
+| `target_app_registry_id` | uuid | null | İsteğin iletildiği uygulama (`fk1` → `app_registry.id`). Doluysa `target_url` göreli (`/api/...`) yazılabilir; gerçek adres = uygulamanın tam adresi + `target_url`. Uygulama güncellenince Redis yenilenir. Entegrasyon haritasında `incoming` tarafını oluşturur. | `3f1c2b7e-...` |
+| `source_app_registry_id` | uuid | null | Bu route'u çağıran uygulama (`fk2` → `app_registry.id`). **Sadece bilgi amaçlıdır**, çalışma anında kullanılmaz; entegrasyon haritasında `outgoing` tarafını oluşturur. | `5b0c9e1a-...` |
 
 Anahtarlar:
 - `uk1_proxy_route (route_code, counter_of_unique_data)`: aynı kodla iki aktif route olamaz.
+- `fk1_proxy_route (target_app_registry_id)`, `fk2_proxy_route (source_app_registry_id)` → `app_registry(id)`; indeksler `ix1_proxy_route`, `ix2_proxy_route`.
 - `uk2_proxy_route (source_path, source_method, counter_of_unique_data)`: aynı path + metot için iki aktif route olamaz (`source_path = '-'` olanlar hariç).
 
 ### `proxy_field_map` — Alan eşleştirmeleri
@@ -526,8 +616,10 @@ Her satır, endpoint'leri okunacak bir servistir: "şu servisin swagger doküman
 | `last_sync_result` | smallint | 0 | Son senkronizasyonun sonucu. Kilit nedeniyle atlanan çalışmalar bu alanı değiştirmez. | 0 NEVER, 1 SUCCESS, 2 ERROR |
 | `last_sync_message` | varchar(2000) | `-` | Başarılıysa özet, hatalıysa hata mesajı. Doküman bulunamadığında denenen tüm adresleri ve sonuçlarını içerir. 2000 karakterde kesilir. | `12 endpoint: 2 yeni, 1 güncellenen, 9 değişmeyen, 0 kaldırılan (CANCELLED)` |
 | `endpoint_count` | integer | 0 | Son **başarılı** senkronizasyonda dokümanda bulunan endpoint sayısı. Hatalı çalışmada eski değer korunur. | `12` |
+| `auth_profile_id` | uuid | null | Doküman okunurken kullanılacak token tanımı (`fk1` → `auth_profile.id`). Boşsa token gönderilmez. Kayıtta tanımın var olduğu ve iptal edilmediği kontrol edilir. | `3f1c2b7e-...` |
+| `app_registry_id` | uuid | null | Kaynağın ait olduğu uygulama (`fk2` → `app_registry.id`). Doluysa kaynak uygulama tarafından yönetilir: `source_code`, `swagger_url`, `target_base_url`, `auth_profile_id` uygulamadan yazılır ve swagger API'sinden değiştirilemez. Boşsa elle yönetilen kaynaktır. | `8d0f5a3e-...` |
 
-Anahtar: `uk1_swagger_source (source_code, counter_of_unique_data)`.
+Anahtarlar: `uk1_swagger_source (source_code, counter_of_unique_data)`, `uk2_swagger_source (app_registry_id, counter_of_unique_data) WHERE app_registry_id IS NOT NULL` (bir uygulamanın tek kaynağı), `fk1_swagger_source (auth_profile_id) → auth_profile(id)`, `fk2_swagger_source (app_registry_id) → app_registry(id)`.
 
 > `last_sync_*` ve `endpoint_count` güncellenirken `etag` **değiştirilmez**. Bunlar sistemin yazdığı durum bilgileridir; değişseydi kaynağı ekranda açık tutan kullanıcının `PUT` isteği her senkronizasyondan sonra etag hatası alırdı.
 
@@ -566,6 +658,46 @@ Anahtar ve indeks:
 - `ix1_swagger_endpoint (swagger_source_id, status)`.
 
 > JSON kolonları dokümandaki sırayla, boşluksuz yazılır. Kaynak servis aynı dokümanı farklı alan sırasıyla üretirse endpoint "güncellenen" sayılır (etag yenilenir); veri kaybı olmaz.
+
+### `auth_profile` — Token alma tanımları
+
+Her satır, korunan bir servise erişmek için **token nasıl alınır** tanımıdır: "şu adrese şu gövde ve header'larla istek at, cevaptaki şu alanı token olarak kullan". Şimdilik swagger dokümanı okurken kullanılır (`swagger_source.auth_profile_id`); bir tanım birden fazla kaynağa bağlanabilir. Süreç için [Token korumalı swagger dokümanları](#token-korumalı-swagger-dokümanları) bölümüne bakın.
+
+| Kolon | Tip | Zorunlu / Varsayılan | Açıklama | Örnek / geçerli değerler |
+|---|---|---|---|---|
+| `profile_code` | varchar(50) | Zorunlu | Tanımın benzersiz kodu (`uk1`). Hata mesajlarında ve loglarda görünür. | `ZENERGY_SSO` |
+| `profile_description` | varchar(150) | `-` | Açıklama. **Sadece bilgi amaçlıdır.** | `Zenergy SSO password grant` |
+| `token_url` | varchar(500) | Zorunlu | Token isteğinin atılacağı tam adres. `http://` veya `https://` ile başlamalıdır. | `http://localhost:7260/sso-service/api/v1/ns/auth/token` |
+| `token_method` | smallint | 2 | Token isteğinin metodu. Sadece POST ve PUT desteklenir. | 2 POST, 3 PUT |
+| `content_type` | smallint | 1 | Gövdenin biçimi; `Content-Type` header'ı buna göre gönderilir. | 1 JSON (`application/json`), 2 FORM (`application/x-www-form-urlencoded`) |
+| `grant_type` | varchar(50) | `password` | Gövdedeki `grant_type`. `-` ise gönderilmez. | `password`, `client_credentials` |
+| `client_id` | varchar(100) | `-` | Gövdedeki `client_id`. `-` ise gönderilmez. | `zenergy-client` |
+| `client_secret` | varchar(1000) | null | Gövdedeki `client_secret`. Boşsa gönderilmez. API ile kaydedilince **şifreli** saklanır (`enc:v1:...`); API cevaplarında hiç dönmez. | — |
+| `username` | varchar(100) | `-` | Gövdedeki `username`. `-` ise gönderilmez. | `bsezgun` |
+| `password` | varchar(1000) | null | Gövdedeki `password`. Boşsa gönderilmez. API ile kaydedilince **şifreli** saklanır; API cevaplarında hiç dönmez (`passwordSet: true/false` döner). | — |
+| `extra_body_json` | text | null | Gövdeye eklenecek diğer alanlar, JSON nesnesi olarak. Yukarıdaki alanlarla aynı ad varsa bunlar geçerlidir. FORM'da nesne/dizi değerleri JSON metni olarak gönderilir. | `{"scope":"openid"}` |
+| `custom_headers_json` | text | null | Token isteğine eklenecek header'lar, JSON nesnesi olarak (`ad → değer`). | `{"realm":"zenergy"}` |
+| `token_field` | varchar(100) | `access_token` | Cevapta token'ın bulunduğu alan. İç içe alanlar nokta ile yazılır. | `access_token`, `data.token` |
+| `expires_field` | varchar(100) | `expires_in` | Cevapta token'ın geçerlilik süresinin (saniye) bulunduğu alan. Sayı veya sayı içeren metin olabilir. | `expires_in`, `data.ttl` |
+| `default_ttl_seconds` | integer | 300 | Cevapta süre alanı yoksa token kaç saniye kullanılsın. | `300` |
+| `token_prefix` | varchar(20) | `Bearer` | `Authorization` değerinin öneki. Boş ya da `-` ise token öneksiz gönderilir. | `Bearer` |
+| `connect_timeout_ms` | integer | 5000 | Token servisine bağlantı timeout'u (ms). | `5000` |
+| `read_timeout_ms` | integer | 30000 | Token servisinden cevap bekleme süresi (ms). | `30000` |
+
+Anahtar: `uk1_auth_profile (profile_code, counter_of_unique_data)`.
+
+Senin tanımından üretilen token isteği (gövde alan sırası: `grant_type`, `client_id`, `client_secret`, `username`, `password`, sonra `extra_body_json`):
+
+```
+POST http://localhost:7260/sso-service/api/v1/ns/auth/token
+Content-Type: application/json
+Accept: application/json
+realm: zenergy
+
+{"grant_type":"password","client_id":"zenergy-client","username":"bsezgun","password":"admin"}
+```
+
+> **Şifreleme.** `password` ve `client_secret` AES-256-GCM ile şifrelenir. Anahtar `auth.profile.secret-key` ayarıdır (ortam değişkeni `AUTH_PROFILE_SECRET_KEY`); değerin SHA-256 özeti kullanılır, herhangi bir uzun parola olabilir. Anahtar tanımlı değilse şifre içeren tanım **kaydedilemez** (400). Anahtar değişirse kayıtlı şifreler çözülemez ve yeniden girilmelidir. SQL ile elle girilen, `enc:v1:` ile başlamayan değerler düz metin kabul edilir ve çalışır; ancak güvenli değildir, API ile tekrar kaydedin.
 
 ---
 
@@ -681,6 +813,123 @@ Eşleştirmeler: `customerName → musteri.ad`, `items[].code → kalemler[].uru
 
 ---
 
+## Uygulama kaydı (app_registry)
+
+Proxy'nin konuştuğu her sistem (ERP, MES, SSO, ...) `app_registry` tablosunda **bir kez** tanımlanır: adı, amacı, adresi, base path'i ve swagger'ı olup olmadığı. Diğer tanımlar bu kayda bağlanır:
+
+```mermaid
+flowchart LR
+    A["app_registry<br/>ERP · http://erp:8081 · /erp"] -->|1:1, has_swagger = 1| S["swagger_source<br/>adres, token, senkron durumu"]
+    S --> E["swagger_endpoint<br/>okunan endpoint'ler"]
+    R1["proxy_route<br/>target_app = ERP<br/>target_url = /api/siparis"] -->|hedef adres = ERP tam adresi + target_url| A
+    R1 -->|source_app| M["app_registry<br/>MES"]
+    A -->|auth_profile_id| P["auth_profile<br/>token tanımı"]
+```
+
+| Bağlantı | Ne sağlar |
+|---|---|
+| `app_registry` → `swagger_source` (1:1) | Swagger adresi uygulamadan hesaplanır: **tam adres + `swagger_path`**. Endpoint'lerin `full_url`'leri de uygulamanın tam adresiyle oluşur (dokümandaki `servers` değil). |
+| `proxy_route.target_app_registry_id` | Route'un `target_url`'i göreli yazılabilir (`/api/siparis/{id}`). Uygulamanın adresi değişince bütün route'lar kendiliğinden yeni adrese gider. |
+| `proxy_route.source_app_registry_id` | Route'u hangi uygulamanın çağırdığı. Bilgi amaçlıdır, entegrasyon haritası buradan çıkar. |
+| `app_registry.auth_profile_id` | Swagger dokümanı token istiyorsa kullanılacak tanım; swagger kaynağına aktarılır. |
+
+### Tam adres
+
+`tam adres = base_url + base_path` (sondaki `/` kaldırılır, `base_path = '-'` ise yok sayılır).
+
+| `base_url` | `base_path` | `swagger_path` | Tam adres (`fullBaseUrl`) | Swagger adresi (`swaggerUrl`) |
+|---|---|---|---|---|
+| `http://localhost:7261` | `-` | `/swagger-ui/index.html` | `http://localhost:7261` | `http://localhost:7261/swagger-ui/index.html` |
+| `http://erp:8081/` | `erp/` | `/v3/api-docs` | `http://erp:8081/erp` | `http://erp:8081/erp/v3/api-docs` |
+| `http://localhost:7260` | `/sso-service` | (has_swagger = 0) | `http://localhost:7260/sso-service` | `null` |
+
+`fullBaseUrl` ve `swaggerUrl` API cevaplarında hesaplanmış (salt okunur) alanlar olarak döner.
+
+### Swagger kaynağının yönetimi
+
+Uygulama **asıl kaynaktır**; `swagger_source` kaydı uygulamadan türetilir:
+
+| Uygulamada | swagger_source'ta ne olur |
+|---|---|
+| `has_swagger = 1` ile kayıt | Kaynak oluşturulur (`source_code = app_code`, `swagger_url`, `target_base_url = tam adres`, `auth_profile_id`, `auto_sync = 1`) ve **hemen senkronize edilir**. |
+| Aynı kodlu, uygulamaya bağlı olmayan bir kaynak zaten varsa | Yeni kaynak açılmaz; **mevcut kaynak uygulamaya bağlanır** ve adresleri güncellenir. Eski elle tanımlı kaynakları bağlamanın yolu budur: uygulamayı kaynakla aynı kodla oluşturun. (Kaynağın `auto_sync`'i korunur.) |
+| Aynı kodlu kaynak başka bir aktif uygulamaya bağlıysa | 400, uygulama kaydedilmez. |
+| Adres, base path, swagger yolu ya da token tanımı değişirse | Kaynak güncellenir ve hemen senkronize edilir; `full_url`'ler yeni adresle yenilenir. Sadece ad / amaç değişirse senkronizasyon yapılmaz. |
+| `has_swagger = 0` | Kaynak `PASSIVE` olur; endpoint'leri silinmez, senkronizasyon durur. Tekrar 1 yapılınca aynı kaynak `ACTIVE` olur ve senkronize edilir. |
+| Uygulama silinirse (CANCELLED) | Kaynak `PASSIVE` olur. |
+
+Uygulamaya bağlı bir kaynağın `sourceCode`, `swaggerUrl`, `targetBaseUrl`, `authProfileId` ve `appRegistryId` alanları `PUT /api/v1/swagger-source` ile değiştirilemez (400 "uygulama üzerinden güncelleyin"); `autoSync`, açıklama ve `status` değiştirilebilir. `POST /api/v1/swagger-source` ile `appRegistryId` verilemez. Uygulamaya bağlı olmayan kaynaklar eskisi gibi çalışır.
+
+### Göreli `target_url`
+
+| `target_url` | `target_app_registry_id` | Gerçek hedef |
+|---|---|---|
+| `http://...` / `https://...` | boş veya dolu | Olduğu gibi |
+| `/api/siparis/{id}` | ERP (`http://erp:8081/erp`) | `http://erp:8081/erp/api/siparis/{id}` |
+| `/api/siparis/{id}` | boş | Kayıtta **400**: "göreli adres için targetAppRegistryId zorunludur" |
+
+- Adres Redis'e yüklenirken (`reload()`) çözülür; istek anında ek iş yoktur. `{değişken}`'ler ve query string bugünkü gibi istek anında doldurulur.
+- Uygulama güncellenince / silinince Redis otomatik yenilenir.
+- Hedef uygulama iptal edilmişse göreli route **yüklenmez** (uyarı loglanır) ve istekler 404 `ROUTE_NOT_FOUND` alır. Uygulama zaten bağlı route'u varken silinemez; bu durum ancak veritabanı elle değiştirilirse oluşur.
+
+### Entegrasyon haritası
+
+"Bu uygulama kimlerle entegre?" bilgisi elle girilmez, **route'lardan çıkarılır** (her zaman güncel kalır):
+
+- **outgoing**: bu uygulamanın proxy üzerinden çağırdığı uygulamalar (`source_app = bu uygulama` olan route'ların hedefleri).
+- **incoming**: bu uygulamayı çağıranlar (`target_app = bu uygulama` olan route'ların kaynakları). Route'ta çağıran uygulama seçilmemişse `appCode = "-"` ("Tanımsız") altında listelenir.
+
+`GET /api/v1/app-registry/{id}/overview` örneği:
+
+```json
+{
+  "app": { "appCode": "ERP", "appName": "ERP Servisi", "appPurpose": "Sipariş ve stok",
+           "baseUrl": "http://erp:8081", "basePath": "/erp", "hasSwagger": {"id": 1, ...},
+           "fullBaseUrl": "http://erp:8081/erp", "swaggerUrl": "http://erp:8081/erp/swagger-ui/index.html" },
+  "swaggerSource": { "lastSyncResult": {"id": 1, ...}, "lastSyncMessage": "42 endpoint: ...", "endpointCount": 42, ... },
+  "outgoing": [
+    { "appCode": "SSO", "appName": "Zenergy SSO", "routeCount": 1,
+      "routes": [ { "routeCode": "SSO_TOKEN", "sourceMethod": "POST", "sourcePath": "/sso/token",
+                    "targetUrl": "/api/v1/ns/auth/token",
+                    "resolvedTargetUrl": "http://localhost:7260/sso-service/api/v1/ns/auth/token", "status": "ACTIVE" } ] }
+  ],
+  "incoming": [
+    { "appCode": "MES", "appName": "MES", "routeCount": 2, "routes": [ ... ] }
+  ]
+}
+```
+
+İptal edilmiş route'lar haritada görünmez; `PASSIVE` olanlar `status` ile birlikte görünür.
+
+### Silme
+
+Uygulama **silinmez, CANCELLED yapılır** (`counter_of_unique_data` artar, aynı kodla yeni uygulama açılabilir). Uygulamaya bağlı (iptal edilmemiş) route varsa 400 döner ve route kodları listelenir; önce route'ları iptal edin ya da başka uygulamaya bağlayın.
+
+### Kurulum örneği
+
+```bash
+# 1) SSO (swagger yok)
+curl -X POST http://localhost:8080/api/v1/app-registry -H 'Content-Type: application/json' -d '{
+  "appCode": "SSO", "appName": "Zenergy SSO", "appPurpose": "Kullanıcı girişi ve token üretimi",
+  "baseUrl": "http://localhost:7260", "basePath": "/sso-service", "hasSwagger": false }'
+
+# 2) Swagger'ı token ile korunan servis (kayıtta swagger kaynağı oluşur ve senkronize edilir)
+curl -X POST http://localhost:8080/api/v1/app-registry -H 'Content-Type: application/json' -d '{
+  "appCode": "S7261", "appName": "7261 servisi", "appPurpose": "...",
+  "baseUrl": "http://localhost:7261", "basePath": "-", "hasSwagger": true,
+  "swaggerPath": "/swagger-ui/index.html", "authProfileId": "<auth_profile id>" }'
+
+# 3) Route'u uygulamaya bağla (göreli adres)
+curl -X POST http://localhost:8080/api/v1/proxy-route -H 'Content-Type: application/json' -d '{
+  "routeCode": "S7261_ORDER", "sourcePath": "/s7261/order", "sourceMethod": "POST",
+  "targetUrl": "/api/v1/order", "targetAppRegistryId": "<S7261 id>", "sourceAppRegistryId": "<çağıran uygulama id>" }'
+
+# 4) Haritaya bak
+curl http://localhost:8080/api/v1/app-registry/<S7261 id>/overview
+```
+
+---
+
 ## Swagger'dan endpoint senkronizasyonu
 
 Bu modül, başka servislerin **swagger-ui / OpenAPI dokümanını okuyup** içindeki tüm endpoint'leri (`metot + path`) veritabanına yazar ve güncel tutar. Amaç, entegre olunan sistemlerin hangi uç noktaları sunduğunu elle girmeden tek yerde görmektir.
@@ -693,6 +942,10 @@ Proxy iletim akışından **bağımsızdır**: `swagger_endpoint` kayıtları ro
 |---|---|---|
 | [`swagger_source`](#swagger_source--swagger-kaynakları) | Kullanıcı (API ile); `last_sync_*` alanlarını senkron servisi | Okunacak servisin swagger adresi ve son senkronizasyonun sonucu |
 | [`swagger_endpoint`](#swagger_endpoint--okunan-endpointler) | Sadece senkron servisi | Dokümandan okunan her `metot + path` için bir satır |
+| [`auth_profile`](#auth_profile--token-alma-tanımları) | Kullanıcı (API ile) | Doküman token ile korunuyorsa token'ın nasıl alınacağı (opsiyonel) |
+| [`app_registry`](#app_registry--uygulamalar) | Kullanıcı (API ile) | Kaynak bir uygulamaya bağlıysa adres, base path ve token tanımı oradan gelir (önerilen yol) |
+
+> **Önerilen kullanım:** swagger kaynağını doğrudan oluşturmak yerine uygulamayı `has_swagger = 1` ile [`app_registry`](#uygulama-kaydı-app_registry)'ye kaydedin; kaynak otomatik oluşur ve uygulamanın base path'ini kullanır. Bu bölümdeki kurallar her iki yolda da aynıdır.
 
 ### Akış
 
@@ -708,7 +961,10 @@ sequenceDiagram
 
     U->>A: POST /api/v1/swagger-source/{id}/sync (veya cron / açılış)
     A->>S: sync(kaynak)
-    S->>L: load(swagger_url)
+    opt kaynağa auth_profile bağlı
+        S->>S: token al (bellekten ya da SSO'dan)
+    end
+    S->>L: load(swagger_url, Authorization)
     L->>T: GET swagger-ui / swagger-config / api-docs
     T-->>L: OpenAPI 3 / Swagger 2 dokümanı (JSON veya YAML)
     L-->>S: doküman(lar) (springdoc grupları dahil)
@@ -727,15 +983,16 @@ Adım adım:
 | # | Adım | Sorumlu sınıf | Hata durumunda |
 |---|---|---|---|
 | 1 | Senkronizasyon tetiklenir (kayıt, elle, açılış veya cron) | `SwaggerSourceService`, `SwaggerSourceResources`, `SwaggerSyncScheduler` | — |
-| 2 | `swagger_url`'den doküman adresi bulunur ve doküman(lar) indirilir | `SwaggerDocLoader` + `SwaggerDocClient` | `ERROR`; mevcut endpoint'lere dokunulmaz |
-| 3 | Her dokümandaki `paths` → `metot + path` listesine çevrilir, tam adres hesaplanır | `SwaggerSpecParser` | `ERROR` |
-| 4 | Hiç endpoint çıkmadıysa işlem durdurulur | `SwaggerSyncService` | `ERROR` ("hiç endpoint bulunamadı"); mevcut kayıtlar korunur |
-| 5 | Transaction açılır, kaynak için kilit alınır | `SwaggerEndpointDaoImpl.tryLockSource` | Kilit alınamazsa çalışma **atlanır** (`skipped = true`) |
-| 6 | Her endpoint upsert edilir | `SwaggerEndpointDaoImpl.upsert` | Transaction geri alınır, `ERROR` |
-| 7 | Bu çalışmada görülmeyen endpoint'ler CANCELLED yapılır | `SwaggerEndpointDaoImpl.cancelMissing` | Transaction geri alınır, `ERROR` |
-| 8 | Sonuç `swagger_source`'a yazılır, `SwaggerSyncResult` döner | `SwaggerSourceDaoImpl.updateSyncResult` | Yazılamazsa sadece loglanır; sonuç yine döner |
+| 2 | Kaynağa `auth_profile` bağlıysa token alınır (bkz. [Token korumalı swagger dokümanları](#token-korumalı-swagger-dokümanları)) | `AuthTokenService` + `AuthTokenClient` | `ERROR` ("Token alınamadı ..."); mevcut endpoint'lere dokunulmaz |
+| 3 | `swagger_url`'den doküman adresi bulunur ve doküman(lar) indirilir; token varsa her isteğe `Authorization` eklenir. 401/403'te token yenilenip bir kez daha denenir | `SwaggerDocLoader` + `SwaggerDocClient` | `ERROR`; mevcut endpoint'lere dokunulmaz |
+| 4 | Her dokümandaki `paths` → `metot + path` listesine çevrilir, tam adres hesaplanır | `SwaggerSpecParser` | `ERROR` |
+| 5 | Hiç endpoint çıkmadıysa işlem durdurulur | `SwaggerSyncService` | `ERROR` ("hiç endpoint bulunamadı"); mevcut kayıtlar korunur |
+| 6 | Transaction açılır, kaynak için kilit alınır | `SwaggerEndpointDaoImpl.tryLockSource` | Kilit alınamazsa çalışma **atlanır** (`skipped = true`) |
+| 7 | Her endpoint upsert edilir | `SwaggerEndpointDaoImpl.upsert` | Transaction geri alınır, `ERROR` |
+| 8 | Bu çalışmada görülmeyen endpoint'ler CANCELLED yapılır | `SwaggerEndpointDaoImpl.cancelMissing` | Transaction geri alınır, `ERROR` |
+| 9 | Sonuç `swagger_source`'a yazılır, `SwaggerSyncResult` döner | `SwaggerSourceDaoImpl.updateSyncResult` | Yazılamazsa sadece loglanır; sonuç yine döner |
 
-Adım 2–4 HTTP çağrısıdır ve **transaction dışında** yapılır; yavaş bir swagger sunucusu veritabanı bağlantısını meşgul etmez. Adım 5–7 tek transaction'dır: ya hepsi yazılır ya hiçbiri.
+Adım 2–5 HTTP çağrısıdır ve **transaction dışında** yapılır; yavaş bir swagger sunucusu veritabanı bağlantısını meşgul etmez. Adım 6–8 tek transaction'dır: ya hepsi yazılır ya hiçbiri.
 
 ### Ne zaman çalışır
 
@@ -767,7 +1024,8 @@ Adım 2–4 HTTP çağrısıdır ve **transaction dışında** yapılır; yavaş
 - **Doküman tanıma**: kökte `openapi` veya `swagger` alanı ve nesne olan `paths` varsa dokümandır. HTML cevaplar (`<` ile başlayan) atlanır. JSON değilse YAML olarak okunur.
 - **Sunucuya hiç ulaşılamazsa** (bağlantı reddi, DNS, timeout) 4. adımdaki adresler denenmez; her biri ayrı timeout bekletmesin diye hemen hata verilir.
 - Hata mesajında denenen her adres ve sonucu yazar: `http://erp:8081/v3/api-docs → HTTP 404; ...`.
-- İstek `Accept: application/json, application/yaml` ile atılır. Kimlik doğrulama header'ı gönderilmez (bkz. [Sınırlamalar](#sınırlamalar)).
+- İstek `Accept: application/json, application/yaml` ile atılır. Kaynağa token tanımı bağlıysa her isteğe `Authorization` header'ı da eklenir.
+- Denemelerden biri 401 / 403 dönerse hata mesajı bunu belirtir (`HTTP 401 (yetkisiz)`) ve token tanımı bağlıysa token yenilenip okuma bir kez tekrarlanır.
 
 ### Endpoint'e dönüştürme
 
@@ -843,6 +1101,83 @@ Her çalışma `swagger_source`'a ve API cevabına (`SwaggerSyncResult`) yazıl�
 | `insertedCount` … `cancelledCount` | Yazma sonucu. Hata durumunda hepsi 0 (transaction geri alındığı için). |
 | `durationMs` | İndirme + yazma toplam süresi. |
 
+### Token korumalı swagger dokümanları
+
+Hedef servisin `/v3/api-docs` adresi token istiyorsa (`Authorization: Bearer ...`), kaynağa bir [`auth_profile`](#auth_profile--token-alma-tanımları) tanımı bağlanır. Senkronizasyon dokümanı okumadan önce token alır ve **tüm** doküman isteklerine (swagger-ui sayfası, swagger-config, grup dokümanları) ekler.
+
+```mermaid
+sequenceDiagram
+    participant S as SwaggerSyncService
+    participant A as AuthTokenService
+    participant O as SSO (token_url)
+    participant L as SwaggerDocLoader
+    participant T as Hedef servis
+
+    S->>A: getAuthorizationHeader(tanım)
+    alt bellekte geçerli token var
+        A-->>S: Bearer <token>
+    else yok / süresi doldu / tanım değişti
+        A->>O: POST token_url (gövde + realm header'ı)
+        O-->>A: {"access_token": "...", "expires_in": 300}
+        A-->>S: Bearer <token> (bellekte saklanır)
+    end
+    S->>L: load(swagger_url, Authorization)
+    L->>T: GET /v3/api-docs (Authorization: Bearer ...)
+    alt 401 / 403
+        T-->>L: 401
+        L-->>S: SwaggerUnauthorizedException
+        S->>A: invalidate + yeni token
+        S->>L: load(...) bir kez daha
+    else 200
+        T-->>L: doküman
+    end
+```
+
+| Konu | Davranış |
+|---|---|
+| Token ne zaman alınır | Bellekte geçerli token yoksa. Her senkronizasyonda SSO'ya **gidilmez**. |
+| Bellekte ne kadar kalır | `expires_in − 30 sn` (süre 60 sn'den kısaysa `%80`'i). Cevapta süre yoksa `default_ttl_seconds`. |
+| Tanım değişirse | `PUT`/`DELETE` bellekteki token'ı siler; ayrıca token tanımın `etag`'i ile saklandığı için eski token kullanılmaz. |
+| Doküman 401 / 403 dönerse | Bellekteki token silinir, yeni token alınır, okuma **bir kez** tekrarlanır. Yine reddedilirse `ERROR`: "Gönderilen token kabul edilmedi". |
+| Token alınamazsa | Senkronizasyon `ERROR`; endpoint'lere dokunulmaz. `last_sync_message` örnekleri: `Token alınamadı (ZENERGY_SSO): HTTP 401 - {"error":"invalid_grant",...}`, `Token servisine ulaşılamadı (ZENERGY_SSO): http://... (Connection refused)`, `Token cevabında 'access_token' alanı yok (ZENERGY_SSO). Cevaptaki alanlar: token` |
+| Kaynağa tanım bağlı değil ama doküman 401 dönüyor | `ERROR`: "Swagger dokümanı yetki istiyor; kaynağa bir token tanımı bağlayın (authProfileId)". |
+| Güvenlik | Şifre, `client_secret` ve token hiçbir log'a, hata mesajına ya da API cevabına yazılmaz. `/test` sadece token'ın ilk 10 karakterini döner. Token bellekte tutulur; her uygulama instance'ı kendi token'ını alır. |
+
+**Adım adım kurulum** (`http://localhost:7261/swagger-ui/index.html` dokümanı `http://localhost:7260` SSO'sunun token'ıyla korunuyorsa):
+
+1. Uygulamayı anahtarla başlatın (bir kez üretip saklayın):
+   ```bash
+   export AUTH_PROFILE_SECRET_KEY="$(openssl rand -base64 32)"
+   ```
+2. Token tanımını kaydedin:
+   ```bash
+   curl -X POST http://localhost:8080/api/v1/auth-profile \
+     -H 'Content-Type: application/json' \
+     -d '{
+       "profileCode": "ZENERGY_SSO",
+       "tokenUrl": "http://localhost:7260/sso-service/api/v1/ns/auth/token",
+       "contentType": "JSON",
+       "grantType": "password",
+       "clientId": "zenergy-client",
+       "username": "bsezgun",
+       "password": "admin",
+       "customHeadersJson": "{\"realm\":\"zenergy\"}"
+     }'
+   ```
+   Cevapta `password` yoktur, `"passwordSet": true` vardır. `id`'yi not edin.
+3. Token alınabildiğini kontrol edin:
+   ```bash
+   curl -X POST http://localhost:8080/api/v1/auth-profile/<id>/test
+   # {"success":true,"httpStatus":200,"tokenPreview":"eyJhbGciOi…","expiresInSeconds":300,...}
+   ```
+4. Swagger kaynağını tanıma bağlayarak kaydedin (kayıtta hemen senkronize edilir):
+   ```bash
+   curl -X POST http://localhost:8080/api/v1/swagger-source \
+     -H 'Content-Type: application/json' \
+     -d '{"sourceCode":"S7261","swaggerUrl":"http://localhost:7261/swagger-ui/index.html","authProfileId":"<id>"}'
+   ```
+   Var olan bir kaynağa bağlamak için `PUT /api/v1/swagger-source` ile `authProfileId` verip `POST /{id}/sync` çağırın.
+
 ### Örnek: yeni bir servisi ekleme
 
 1. Kaynağı kaydedin. Kayıt cevabında `lastSyncResult` ve `lastSyncMessage` dolu döner:
@@ -861,7 +1196,7 @@ Her çalışma `swagger_source`'a ve API cevabına (`SwaggerSyncResult`) yazıl�
 
 ### Sınırlamalar
 
-- Kimlik doğrulama gerektiren swagger adresleri desteklenmez (header/token gönderilmez). Swagger dokümanı proxy sunucusundan erişilebilir ve açık olmalıdır.
+- Token almada sadece tek adımlı istekler desteklenir (password / client_credentials gibi). `refresh_token` kullanılmaz; süre dolunca yeniden giriş yapılır. Basic auth, API key header'ı veya mTLS desteklenmez (API key, `custom_headers_json` ile token isteğine eklenebilir ama swagger isteğine eklenmez).
 - `$ref` şemaları çözülmez; `components` / `definitions` ayrıca saklanmaz.
 - Endpoint'lerden otomatik `proxy_route` üretilmez.
 - Swagger 1.x (`/swagger-resources` tabanlı eski springfox listeleri) desteklenmez; springfox'ta `/v2/api-docs` kullanılır.
@@ -886,7 +1221,7 @@ Her çalışma `swagger_source`'a ve API cevabına (`SwaggerSyncResult`) yazıl�
 | POST | `/` | `ProxyRouteEntity` | Ekle (+ Redis yenile) |
 | POST | `/all` | `[ProxyRouteEntity]` | Toplu ekle |
 | PUT | `/` | `ProxyRouteEntity` | Güncelle |
-| DELETE | `/` | `ProxyRouteEntity` | Sil (CANCELLED) |
+| DELETE | `/` | `ProxyRouteEntity` | Kaydı siler (fiziksel; eşleştirmesi varsa FK hatası). İptal için `PUT` ile `status = 1` |
 | POST | `/cache/refresh` | — | Redis'i DB'den yenile → `{"loadedRouteCount": n}` |
 | GET | `/cache` | — | Redis'teki tanımlar |
 
@@ -902,7 +1237,9 @@ Her çalışma `swagger_source`'a ve API cevabına (`SwaggerSyncResult`) yazıl�
   "connectTimeoutMs": 5000,
   "readTimeoutMs": 30000,
   "logBody": true,
-  "passUnmappedFields": false
+  "passUnmappedFields": false,
+  "targetAppRegistryId": null,
+  "sourceAppRegistryId": null
 }
 ```
 
@@ -915,7 +1252,7 @@ Her çalışma `swagger_source`'a ve API cevabına (`SwaggerSyncResult`) yazıl�
 | POST | `/` | `ProxyFieldMapEntity` | Ekle (+ doğrulama + Redis yenile) |
 | POST | `/all` | `[ProxyFieldMapEntity]` | Toplu ekle |
 | PUT | `/` | `ProxyFieldMapEntity` | Güncelle |
-| DELETE | `/` | `ProxyFieldMapEntity` | Sil (CANCELLED) |
+| DELETE | `/` | `ProxyFieldMapEntity` | Kaydı siler (fiziksel). İptal için `PUT` ile `status = 1` |
 
 Örnek kayıt:
 ```json
@@ -945,7 +1282,7 @@ Her çalışma `swagger_source`'a ve API cevabına (`SwaggerSyncResult`) yazıl�
 | POST | `/` | `SwaggerSourceEntity` | Ekle (+ `autoSync` ise hemen senkronize et; cevapta `lastSync*` dolu) |
 | POST | `/all` | `[SwaggerSourceEntity]` | Toplu ekle (senkronizasyon yok) |
 | PUT | `/` | `SwaggerSourceEntity` | Güncelle (senkronizasyon yok) |
-| DELETE | `/` | `SwaggerSourceEntity` | Sil (CANCELLED); endpoint satırları kalır |
+| DELETE | `/` | `SwaggerSourceEntity` | Kaydı siler (fiziksel); endpoint'leri varsa FK hatası alınır. İptal / durdurmak için `PUT` ile `status` = 1 veya 2 |
 | POST | `/{id}/sync` | — | Kaynağı hemen senkronize et → `SwaggerSyncResult`. Kaynak yoksa 404. |
 | POST | `/sync` | — | `status = 3` ve `auto_sync = 1` olanların hepsi → `[SwaggerSyncResult]` |
 
@@ -958,9 +1295,53 @@ Eksik `sourceCode` veya geçersiz `swaggerUrl` 400 `{"message":"..."}` döner.
   "sourceDescription": "ERP servisi",
   "swaggerUrl": "http://erp:8081/swagger-ui/index.html",
   "targetBaseUrl": "-",
-  "autoSync": true
+  "autoSync": true,
+  "authProfileId": null
 }
 ```
+
+### `/api/v1/app-registry`
+
+| Metot | Yol | Gövde | Açıklama |
+|---|---|---|---|
+| GET | `/{id}/{etag}` | — | Tek uygulama (`fullBaseUrl`, `swaggerUrl` dahil) |
+| POST | `/search` | `{"appCode":"ERP"}` (opsiyonel) | Koşula göre listeleme |
+| POST | `/` | `AppRegistryEntity` | Ekle; `hasSwagger = 1` ise swagger kaynağı oluşur ve senkronize edilir |
+| POST | `/all` | `[AppRegistryEntity]` | Toplu ekle (her biri `POST /` gibi) |
+| PUT | `/` | `AppRegistryEntity` (`id` + `etag`) | Güncelle; swagger kaynağı ve Redis güncellenir. `status = 1` ile iptal edilemez, `DELETE` kullanın |
+| DELETE | `/` | `AppRegistryEntity` (`id` + `etag`) | **CANCELLED** yapar (fiziksel silme yok); bağlı route varsa 400 |
+| POST | `/{id}/sync` | — | Swagger'ı hemen senkronize et → `SwaggerSyncResult`; swagger yoksa 400 |
+| GET | `/{id}/overview` | — | `AppOverview` (swagger durumu + outgoing / incoming) |
+| POST | `/overview` | — | Tüm uygulamaların `AppOverview` listesi (entegrasyon haritası) |
+
+Örnek kayıt:
+```json
+{
+  "appCode": "ERP",
+  "appName": "ERP Servisi",
+  "appPurpose": "Sipariş, stok ve fatura işlemleri",
+  "appOwner": "ERP ekibi",
+  "baseUrl": "http://erp:8081",
+  "basePath": "/erp",
+  "hasSwagger": true,
+  "swaggerPath": "/swagger-ui/index.html",
+  "authProfileId": null
+}
+```
+
+### `/api/v1/auth-profile`
+
+| Metot | Yol | Gövde | Açıklama |
+|---|---|---|---|
+| GET | `/{id}/{etag}` | — | Tek tanım (`password` / `clientSecret` yok) |
+| POST | `/search` | `{"profileCode":"ZENERGY_SSO"}` (opsiyonel) | Koşula göre listeleme |
+| POST | `/` | `AuthProfileEntity` | Ekle; şifre alanları şifrelenir |
+| POST | `/all` | `[AuthProfileEntity]` | Toplu ekle |
+| PUT | `/` | `AuthProfileEntity` (`id` + `etag` zorunlu) | Güncelle. `password` / `clientSecret` boşsa eski değer korunur, `"-"` ise silinir. Bellekteki token silinir. |
+| DELETE | `/` | `AuthProfileEntity` | Kaydı siler (fiziksel); bir kaynak ya da uygulama kullanıyorsa FK hatası alınır. İptal için `PUT` ile `status = 1`; bağlı kaynaklar sonraki senkronizasyonda "token tanımı bulunamadı" hatası alır. |
+| POST | `/{id}/test` | — | Token almayı dener → `AuthTokenTestResult`. Tanım yoksa 404. |
+
+Doğrulama hataları 400 `{"message":"..."}` döner. Örnek kayıt için [Token korumalı swagger dokümanları](#token-korumalı-swagger-dokümanları)'na bakın.
 
 ### `/api/v1/swagger-endpoint`
 
@@ -1029,6 +1410,7 @@ Proxy'nin **kendi ürettiği** hatalar aşağıdaki formatta döner. Hedef siste
 | `proxy.cache.key-prefix` | `message-proxy` | Redis anahtar ön eki. Aynı Redis'i paylaşan ortamlarda farklı verin. |
 | `proxy.forward.default-url` | `http://localhost` | Feign'in zorunlu taban adresi. Gerçek hedef her çağrıda belirlenir. |
 | `proxy.log.max-body-length` | `100000` | Log'a yazılacak gövdenin en fazla karakter sayısı |
+| `auth.profile.secret-key` | `${AUTH_PROFILE_SECRET_KEY:}` | `auth_profile` şifre / client_secret şifreleme anahtarı. **Ortam değişkeninden verin.** Boşsa şifre içeren tanım kaydedilemez. |
 | `swagger.sync.enabled` | `true` | Swagger zamanlayıcısı ve açılış senkronizasyonu açık mı |
 | `swagger.sync.on-startup` | `true` | Açılışta ACTIVE + `auto_sync = 1` kaynakları senkronize et |
 | `swagger.sync.cron` | `0 0 * * * *` | Zamanlanmış senkronizasyon (her saat başı) |
@@ -1121,6 +1503,14 @@ Yeni alan çalışma anında kullanılacaksa sadece entity'ye eklemek yetmez:
 | Kaynak bazlı advisory lock, bekleme yok | Cron + elle tetikleme ya da birden fazla instance aynı kaynağı aynı anda yazmasın |
 | Senkron zamanı DB saatinden | Sunucular arası saat farkı "dokümandan kalktı" kararını bozmasın |
 | Değişmeyen endpoint'in etag'i korunur | Endpoint'i ekranda açık tutan kullanıcı gereksiz etag hatası almasın |
+| Token bellekte, `expires_in − 30 sn` | SSO'ya her senkronizasyonda gidilmesin; süresi dolmak üzere olan token kullanılmasın |
+| 401'de token yalnızca bir kez yenilenir | Yanlış tanımda SSO'ya sonsuz istek atılmasın |
+| Şifre AES-GCM ile şifreli, API'de dönmez | Veritabanına ya da API'ye erişen biri şifreyi okuyamasın |
+| Anahtar yoksa şifre kaydedilmez | Şifrenin sessizce düz metin saklanması engellensin |
+| Uygulama asıl kaynak, swagger_source ondan türetilir | Adres iki yerde tutulup birbirinden kopmasın |
+| Entegrasyon haritası route'lardan çıkarılır | Elle girilen liste zamanla gerçekle uyuşmaz hâle gelmesin |
+| Göreli `target_url` Redis yüklemesinde çözülür | Uygulama adresi tek yerden değişsin, istek anında ek iş olmasın |
+| Route'u olan uygulama silinemez | Route'lar sessizce çözülemez hâle gelmesin |
 
 ---
 
@@ -1138,7 +1528,17 @@ Yeni alan çalışma anında kullanılacaksa sadece entity'ye eklemek yetmez:
 | 504 `TARGET_TIMEOUT` | Route'un `read_timeout_ms` değerini artırın. |
 | Swagger: `last_sync_result = 2`, "dokümanı bulunamadı" | `last_sync_message`'daki denenen adreslere bakın. Doküman adresini (`.../v3/api-docs`) doğrudan `swagger_url`'e yazmayı deneyin. springdoc'ta `springdoc.api-docs.path` değiştirilmişse yeni yol yazılmalıdır. |
 | Swagger: "adresine ulaşılamadı" | Proxy sunucusundan hedefe ağ erişimi yok, host/port yanlış ya da timeout kısa. `swagger.sync.connect-timeout-ms` / `read-timeout-ms`'i kontrol edin. |
-| Swagger: HTTP 401 / 403 | Swagger dokümanı kimlik doğrulama istiyor; desteklenmez. Hedef serviste api-docs yolunu açık bırakın. |
+| Swagger: "yetki istiyor; kaynağa bir token tanımı bağlayın" | Doküman token istiyor. Bir `auth_profile` tanımlayıp kaynağın `authProfileId`'sine verin (bkz. [Token korumalı swagger dokümanları](#token-korumalı-swagger-dokümanları)). |
+| Swagger: "Gönderilen token kabul edilmedi" | Token alındı ama hedef servis reddetti: kullanıcının yetkisi yok, `realm` yanlış ya da hedef servis farklı bir SSO'ya bağlı. `token_prefix`'i kontrol edin. |
+| "Token alınamadı (...): HTTP 401" | Kullanıcı adı / şifre / `client_id` / `realm` header'ı yanlış. `POST /api/v1/auth-profile/{id}/test` ile deneyin; mesajdaki SSO cevabına bakın. |
+| "Token cevabında 'access_token' alanı yok" | SSO cevabı farklı yapıda. Mesajdaki "Cevaptaki alanlar"a bakıp `token_field`'ı düzeltin (iç içe ise `data.access_token`). |
+| "... AUTH_PROFILE_SECRET_KEY ... tanımlı olmalıdır" | Uygulamayı `AUTH_PROFILE_SECRET_KEY` ortam değişkeniyle başlatın. IntelliJ'de Run Configuration → Environment variables. |
+| Route 404 `ROUTE_NOT_FOUND`, kayıtta görünüyor | Göreli `target_url`'in hedef uygulaması iptal edilmiş ya da bulunamıyor; logda "hedef adresi çözülemedi" uyarısı vardır. Route'u aktif bir uygulamaya bağlayın veya mutlak adres yazın. |
+| "'X' kodlu swagger kaynağı başka bir uygulamaya bağlı" | Aynı kodla ikinci bir uygulama açılmak isteniyor. Farklı `appCode` kullanın ya da diğer uygulamayı iptal edin. |
+| "Bu swagger kaynağı bir uygulamaya bağlı ..." | Kaynağın adresini / token'ını uygulama üzerinden (`PUT /api/v1/app-registry`) değiştirin. |
+| "Uygulamaya bağlı route'lar var" (silme) | Listelenen route'ları iptal edin ya da başka uygulamaya bağlayın, sonra tekrar silin. |
+| `DELETE` ile FK hatası / 500 | `mini_jpa` `delete` fiziksel siler; bağlı kayıt varsa veritabanı reddeder. Kaydı `PUT` ile `status = 1` yaparak iptal edin. |
+| "Gizli alan çözülemedi" | Anahtar, kayıt yapılırkenkinden farklı. Eski anahtarı geri verin ya da şifreyi `PUT` ile yeniden girin. |
 | Swagger: "hiç endpoint bulunamadı" | Doküman boş `paths` içeriyor (ör. yanlış springdoc grubu ya da `packagesToScan`). Mevcut endpoint'ler korunmuştur. |
 | Swagger: `full_url` yanlış host / iç adres | Dokümandaki `servers` adresi dışarıdan geçerli değil. `target_base_url`'i doldurup tekrar senkronize edin. |
 | Swagger: sonuçta `skipped = true` | Aynı kaynak için başka bir senkronizasyon o an sürüyordu (cron, açılış ya da başka instance). Biraz sonra tekrar deneyin. |

@@ -17,9 +17,12 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import tr.com.tatmetal.proxy.auth.AuthTokenException;
+import tr.com.tatmetal.proxy.dao.AuthProfileDaoImpl;
 import tr.com.tatmetal.proxy.dao.SwaggerEndpointDaoImpl;
 import tr.com.tatmetal.proxy.dao.SwaggerEndpointDaoImpl.UpsertOutcome;
 import tr.com.tatmetal.proxy.dao.SwaggerSourceDaoImpl;
+import tr.com.tatmetal.proxy.entity.AuthProfileEntity;
 import tr.com.tatmetal.proxy.entity.SwaggerEndpointEntity;
 import tr.com.tatmetal.proxy.entity.SwaggerSourceEntity;
 import tr.com.tatmetal.proxy.enums.SyncResultEnum;
@@ -27,6 +30,7 @@ import tr.com.tatmetal.proxy.swagger.SwaggerDocLoader;
 import tr.com.tatmetal.proxy.swagger.SwaggerDocument;
 import tr.com.tatmetal.proxy.swagger.SwaggerSpecParser;
 import tr.com.tatmetal.proxy.swagger.SwaggerSyncResult;
+import tr.com.tatmetal.proxy.swagger.SwaggerUnauthorizedException;
 
 /**
  * Tablo bağımsız servis: swagger_source kaydındaki adresten swagger/OpenAPI dokümanını okur ve
@@ -35,6 +39,8 @@ import tr.com.tatmetal.proxy.swagger.SwaggerSyncResult;
  *   <li>Yeni endpoint → eklenir; değişen endpoint → güncellenir (etag yenilenir); aynısı → dokunulmaz.</li>
  *   <li>Dokümandan kalkan endpoint → silinmez, CANCELLED yapılır (counter_of_unique_data artırılır).</li>
  *   <li>Doküman okunamaz ya da boş gelirse mevcut kayıtlara dokunulmaz; hata swagger_source'a yazılır.</li>
+ *   <li>Kaynağa auth_profile bağlıysa doküman okunmadan önce token alınır ve tüm doküman isteklerine
+ *       {@code Authorization} header'ı eklenir; doküman 401/403 dönerse token yenilenip bir kez daha denenir.</li>
  *   <li>Tüm yazma işlemi tek transaction'dadır ve kaynak bazında kilitlidir (aynı anda iki senkronizasyon çalışmaz).</li>
  * </ul>
  */
@@ -48,6 +54,8 @@ public class SwaggerSyncService {
     private final SwaggerEndpointDaoImpl swaggerEndpointDao;
     private final SwaggerDocLoader swaggerDocLoader;
     private final SwaggerSpecParser swaggerSpecParser;
+    private final AuthProfileDaoImpl authProfileDao;
+    private final AuthTokenService authTokenService;
     private final TransactionTemplate transactionTemplate;
     private final Logger logger = LoggerFactory.getLogger(SwaggerSyncService.class);
 
@@ -55,7 +63,11 @@ public class SwaggerSyncService {
                               SwaggerEndpointDaoImpl swaggerEndpointDao,
                               SwaggerDocLoader swaggerDocLoader,
                               SwaggerSpecParser swaggerSpecParser,
+                              AuthProfileDaoImpl authProfileDao,
+                              AuthTokenService authTokenService,
                               @Qualifier("exDb") DataSource exdbDataSource) {
+        this.authProfileDao = authProfileDao;
+        this.authTokenService = authTokenService;
         this.swaggerSourceDao = swaggerSourceDao;
         this.swaggerEndpointDao = swaggerEndpointDao;
         this.swaggerDocLoader = swaggerDocLoader;
@@ -91,7 +103,7 @@ public class SwaggerSyncService {
         Timestamp syncTime = null;
         try {
             // 1) Dokümanları oku ve endpoint'lere dönüştür (HTTP; transaction dışında)
-            List<SwaggerDocument> documents = swaggerDocLoader.load(source.getSwaggerUrl());
+            List<SwaggerDocument> documents = loadDocuments(source);
             Map<String, SwaggerEndpointEntity> endpoints = new LinkedHashMap<>();
             for (SwaggerDocument document : documents) {
                 result.getDocumentUrls().add(document.getDocumentUri().toString());
@@ -137,6 +149,37 @@ public class SwaggerSyncService {
             logger.info("Swagger senkronizasyonu tamamlandı. {}", result);
         }
         return result;
+    }
+
+    /**
+     * Dokümanları okur. Kaynağa token tanımı bağlıysa Authorization header'ı eklenir; doküman token'ı kabul
+     * etmezse (401/403) bellekteki token silinir, yeni token alınır ve bir kez daha denenir.
+     */
+    private List<SwaggerDocument> loadDocuments(SwaggerSourceEntity source) {
+        if (source.getAuthProfileId() == null) {
+            return swaggerDocLoader.load(source.getSwaggerUrl());
+        }
+        AuthProfileEntity profile = authProfileDao.getById(source.getAuthProfileId());
+        if (profile == null) {
+            throw new IllegalStateException("Kaynağa bağlı token tanımı bulunamadı ya da iptal edilmiş. authProfileId="
+                    + source.getAuthProfileId());
+        }
+        try {
+            return swaggerDocLoader.load(source.getSwaggerUrl(), authorization(profile));
+        } catch (SwaggerUnauthorizedException e) {
+            logger.warn("Swagger dokümanı token'ı kabul etmedi, token yenilenip tekrar denenecek. source={}, profile={}",
+                    source.getSourceCode(), profile.getProfileCode());
+            authTokenService.invalidate(profile.getId());
+            return swaggerDocLoader.load(source.getSwaggerUrl(), authorization(profile));
+        }
+    }
+
+    private Map<String, String> authorization(AuthProfileEntity profile) {
+        try {
+            return Map.of("Authorization", authTokenService.getAuthorizationHeader(profile));
+        } catch (AuthTokenException e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        }
     }
 
     /** Transaction içinde çalışır; senkronizasyon zamanını döner. */

@@ -22,8 +22,10 @@ import org.springframework.util.AntPathMatcher;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import tr.com.tatmetal.proxy.dao.AppRegistryDaoImpl;
 import tr.com.tatmetal.proxy.dao.ProxyFieldMapDaoImpl;
 import tr.com.tatmetal.proxy.dao.ProxyRouteDaoImpl;
+import tr.com.tatmetal.proxy.entity.AppRegistryEntity;
 import tr.com.tatmetal.proxy.entity.ProxyFieldMapEntity;
 import tr.com.tatmetal.proxy.entity.ProxyRouteEntity;
 import tr.com.tatmetal.proxy.enums.HttpMethodEnum;
@@ -51,6 +53,7 @@ public class ProxyRouteCacheService {
 
     private final ProxyRouteDaoImpl proxyRouteDao;
     private final ProxyFieldMapDaoImpl proxyFieldMapDao;
+    private final AppRegistryDaoImpl appRegistryDao;
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
     private final AntPathMatcher pathMatcher = new AntPathMatcher();
@@ -62,11 +65,13 @@ public class ProxyRouteCacheService {
 
     public ProxyRouteCacheService(ProxyRouteDaoImpl proxyRouteDao,
                                   ProxyFieldMapDaoImpl proxyFieldMapDao,
+                                  AppRegistryDaoImpl appRegistryDao,
                                   StringRedisTemplate redisTemplate,
                                   ObjectMapper objectMapper,
                                   @Value("${proxy.cache.key-prefix:message-proxy}") String keyPrefix) {
         this.proxyRouteDao = proxyRouteDao;
         this.proxyFieldMapDao = proxyFieldMapDao;
+        this.appRegistryDao = appRegistryDao;
         this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
         this.routesKey = keyPrefix + ":routes";
@@ -99,6 +104,10 @@ public class ProxyRouteCacheService {
     public synchronized int reload() {
         List<ProxyRouteEntity> routes = proxyRouteDao.getActiveList();
         List<ProxyFieldMapEntity> fieldMaps = proxyFieldMapDao.getActiveList();
+        Map<UUID, AppRegistryEntity> apps = new HashMap<>();
+        for (AppRegistryEntity app : appRegistryDao.getNotCancelledList()) {
+            apps.put(app.getId(), app);
+        }
 
         Map<UUID, List<ProxyFieldMapEntity>> mapsByRoute = new HashMap<>();
         for (ProxyFieldMapEntity fieldMap : fieldMaps) {
@@ -108,7 +117,17 @@ public class ProxyRouteCacheService {
         Map<String, String> exact = new LinkedHashMap<>();
         Map<String, String> patterns = new LinkedHashMap<>();
         for (ProxyRouteEntity route : routes) {
+            AppRegistryEntity targetApp = route.getTargetAppRegistryId() == null
+                    ? null : apps.get(route.getTargetAppRegistryId());
+            String targetUrl = resolveTargetUrl(route.getTargetUrl(), targetApp);
+            if (targetUrl == null) {
+                logger.warn("Route'un hedef adresi çözülemedi (göreli target_url, hedef uygulama yok ya da iptal), "
+                        + "route yüklenmedi. routeCode={}, targetUrl={}, targetAppRegistryId={}",
+                        route.getRouteCode(), route.getTargetUrl(), route.getTargetAppRegistryId());
+                continue;
+            }
             ProxyRouteDefinition definition = toDefinition(route, mapsByRoute.get(route.getId()));
+            definition.setTargetUrl(targetUrl);
             String key = cacheKey(definition.getSourceMethod(), definition.getSourcePath());
             Map<String, String> target = isPattern(definition.getSourcePath()) ? patterns : exact;
             if (target.containsKey(key)) {
@@ -280,6 +299,33 @@ public class ProxyRouteCacheService {
 
     private boolean isPattern(String path) {
         return pathMatcher.isPattern(path);
+    }
+
+    /**
+     * Route'un gerçek hedef adresi.
+     * <ul>
+     *   <li>{@code http://} veya {@code https://} ile başlıyorsa olduğu gibi kullanılır.</li>
+     *   <li>Göreli ise ({@code /api/siparis/{id}}) hedef uygulamanın tam adresinin (base_url + base_path) sonuna eklenir.</li>
+     *   <li>Göreli olup hedef uygulama yoksa {@code null} (route kullanılamaz).</li>
+     * </ul>
+     */
+    public static String resolveTargetUrl(String targetUrl, AppRegistryEntity targetApp) {
+        if (targetUrl == null || targetUrl.isBlank()) {
+            return null;
+        }
+        String url = targetUrl.trim();
+        if (isAbsoluteUrl(url)) {
+            return url;
+        }
+        if (targetApp == null || targetApp.getFullBaseUrl() == null) {
+            return null;
+        }
+        return targetApp.getFullBaseUrl() + (url.startsWith("/") ? url : "/" + url);
+    }
+
+    public static boolean isAbsoluteUrl(String url) {
+        String lower = url.trim().toLowerCase(java.util.Locale.ROOT);
+        return lower.startsWith("http://") || lower.startsWith("https://");
     }
 
     /** Baştaki "/" garanti edilir, sondaki "/" kaldırılır (kök hariç). */

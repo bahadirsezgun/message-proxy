@@ -1,6 +1,8 @@
 package tr.com.tatmetal.proxy.dao;
 
 import static tr.com.tatmetal.proxy.dao.sql.SwaggerSourceSql.SWAGGER_SOURCE_GET_AUTO_SYNC_SQL;
+import static tr.com.tatmetal.proxy.dao.sql.SwaggerSourceSql.SWAGGER_SOURCE_GET_BY_APP_SQL;
+import static tr.com.tatmetal.proxy.dao.sql.SwaggerSourceSql.SWAGGER_SOURCE_GET_BY_CODE_SQL;
 import static tr.com.tatmetal.proxy.dao.sql.SwaggerSourceSql.SWAGGER_SOURCE_GET_BY_ID_SQL;
 import static tr.com.tatmetal.proxy.dao.sql.SwaggerSourceSql.SWAGGER_SOURCE_GET_ONE_SQL;
 import static tr.com.tatmetal.proxy.dao.sql.SwaggerSourceSql.SWAGGER_SOURCE_GET_SQL;
@@ -95,6 +97,28 @@ public class SwaggerSourceDaoImpl {
             queryMap.put("id", id);
             return exdbJdbcTemplate.findEntity(SWAGGER_SOURCE_GET_BY_ID_SQL, queryMap,
                     SwaggerSourceEntity.class);
+        } catch (Exception e) {
+            logger.error(e.toString());
+            return null;
+        }
+    }
+
+    public SwaggerSourceEntity getByAppRegistryId(UUID appRegistryId) {
+        try {
+            Map<String, Object> queryMap = new HashMap<>();
+            queryMap.put("appRegistryId", appRegistryId);
+            return exdbJdbcTemplate.findEntity(SWAGGER_SOURCE_GET_BY_APP_SQL, queryMap, SwaggerSourceEntity.class);
+        } catch (Exception e) {
+            logger.error(e.toString());
+            return null;
+        }
+    }
+
+    public SwaggerSourceEntity getBySourceCode(String sourceCode) {
+        try {
+            Map<String, Object> queryMap = new HashMap<>();
+            queryMap.put("sourceCode", sourceCode);
+            return exdbJdbcTemplate.findEntity(SWAGGER_SOURCE_GET_BY_CODE_SQL, queryMap, SwaggerSourceEntity.class);
         } catch (Exception e) {
             logger.error(e.toString());
             return null;

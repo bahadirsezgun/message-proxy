@@ -18,6 +18,9 @@ CREATE SCHEMA IF NOT EXISTS message_proxy;
 
 -- CANCELLED'a çekilen kayıtlarda counter_of_unique_data bu genel sequence ile artırılır.
 CREATE SEQUENCE IF NOT EXISTS message_proxy.counter_of_unique_data_seq START WITH 1 INCREMENT BY 1;
+-- mini_jpa BaseEntity, update ile status = 1 (CANCELLED) yapılan kayıtta counter_of_unique_data'yı
+-- <şema>.system_table_uniqueless_control_seq ile artırır (@Sequence). Bu sequence yoksa CANCELLED'a çekme hata verir.
+CREATE SEQUENCE IF NOT EXISTS message_proxy.system_table_uniqueless_control_seq START WITH 1 INCREMENT BY 1;
 
 -- ---------------------------------------------------------------------
 -- proxy_route : Gelen mesajın iletileceği hedef tanımları
@@ -276,3 +279,137 @@ COMMENT ON COLUMN message_proxy.swagger_endpoint.parameters_json IS 'Path/query/
 COMMENT ON COLUMN message_proxy.swagger_endpoint.request_body_json IS 'İstek gövdesi tanımı (JSON)';
 COMMENT ON COLUMN message_proxy.swagger_endpoint.responses_json IS 'Cevap tanımları (JSON)';
 COMMENT ON COLUMN message_proxy.swagger_endpoint.last_seen_date IS 'Endpoint''in dokümanda en son görüldüğü senkronizasyon zamanı';
+
+-- ---------------------------------------------------------------------
+-- auth_profile : Korunan servislere erişim için token alma tanımları
+-- (şimdilik swagger dokümanı okurken kullanılır: swagger_source.auth_profile_id)
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS message_proxy.auth_profile (
+    -- <BASE_COLUMNS>
+    id                      uuid                        NOT NULL DEFAULT gen_random_uuid(),
+    id_serial               SERIAL                      NOT NULL,
+    etag                    uuid                        NOT NULL DEFAULT gen_random_uuid(),
+    status                  smallint                    NOT NULL DEFAULT 3,
+    date_of_recorded        timestamp without time zone NOT NULL DEFAULT now(),
+    user_who_recorded       character varying(50)       NOT NULL DEFAULT '-'::character varying,
+    date_of_last_updated    timestamp without time zone NOT NULL DEFAULT now(),
+    user_who_last_updated   character varying(50)       NOT NULL DEFAULT '-'::character varying,
+    counter_of_unique_data  bigint                      NOT NULL DEFAULT 0,
+    -- Tabloya özel alanlar
+    profile_code            character varying(50)       NOT NULL,
+    profile_description     character varying(150)      NOT NULL DEFAULT '-'::character varying,
+    token_url               character varying(500)      NOT NULL,
+    token_method            smallint                    NOT NULL DEFAULT 2,
+    content_type            smallint                    NOT NULL DEFAULT 1,
+    grant_type              character varying(50)       NOT NULL DEFAULT 'password'::character varying,
+    client_id               character varying(100)      NOT NULL DEFAULT '-'::character varying,
+    client_secret           character varying(1000),
+    username                character varying(100)      NOT NULL DEFAULT '-'::character varying,
+    password                character varying(1000),
+    extra_body_json         text,
+    custom_headers_json     text,
+    token_field             character varying(100)      NOT NULL DEFAULT 'access_token'::character varying,
+    expires_field           character varying(100)      NOT NULL DEFAULT 'expires_in'::character varying,
+    default_ttl_seconds     integer                     NOT NULL DEFAULT 300,
+    token_prefix            character varying(20)       NOT NULL DEFAULT 'Bearer'::character varying,
+    connect_timeout_ms      integer                     NOT NULL DEFAULT 5000,
+    read_timeout_ms         integer                     NOT NULL DEFAULT 30000,
+    CONSTRAINT auth_profile_pkey PRIMARY KEY (id),
+    CONSTRAINT uk0_auth_profile UNIQUE (id_serial),
+    CONSTRAINT uk1_auth_profile UNIQUE (profile_code, counter_of_unique_data)
+);
+
+COMMENT ON TABLE  message_proxy.auth_profile IS 'Korunan servislere erişim için token alma tanımları';
+COMMENT ON COLUMN message_proxy.auth_profile.id_serial IS 'Sıralı ID için. Sorgulardaki sıralama kolaylığı için';
+COMMENT ON COLUMN message_proxy.auth_profile.etag IS 'Versiyon kontrolü yaparak aynı anda tek transaction a müsade etmek için';
+COMMENT ON COLUMN message_proxy.auth_profile.status IS '1: CANCELLED, 2: PASSIVE, 3: ACTIVE, 4: CLOSED';
+COMMENT ON COLUMN message_proxy.auth_profile.counter_of_unique_data IS 'CANCELLED kayıtlarda sequence ile artırılır; aynı iş anahtarı tekrar eklenebilsin diye UK''ya dahildir';
+COMMENT ON COLUMN message_proxy.auth_profile.profile_code IS 'Tanım kodu';
+COMMENT ON COLUMN message_proxy.auth_profile.profile_description IS 'Açıklaması';
+COMMENT ON COLUMN message_proxy.auth_profile.token_url IS 'Token alınacak adres';
+COMMENT ON COLUMN message_proxy.auth_profile.token_method IS 'Token isteğinin metodu. 2: POST, 3: PUT';
+COMMENT ON COLUMN message_proxy.auth_profile.content_type IS 'Token isteği gövde biçimi. 1: JSON (application/json), 2: FORM (application/x-www-form-urlencoded)';
+COMMENT ON COLUMN message_proxy.auth_profile.grant_type IS 'Gövdedeki grant_type; ''-'' ise gönderilmez';
+COMMENT ON COLUMN message_proxy.auth_profile.client_id IS 'Gövdedeki client_id; ''-'' ise gönderilmez';
+COMMENT ON COLUMN message_proxy.auth_profile.client_secret IS 'Gövdedeki client_secret; boşsa gönderilmez. API ile kaydedilince şifreli (enc:v1:) saklanır';
+COMMENT ON COLUMN message_proxy.auth_profile.username IS 'Gövdedeki username; ''-'' ise gönderilmez';
+COMMENT ON COLUMN message_proxy.auth_profile.password IS 'Gövdedeki password; boşsa gönderilmez. API ile kaydedilince şifreli (enc:v1:) saklanır';
+COMMENT ON COLUMN message_proxy.auth_profile.extra_body_json IS 'Gövdeye eklenecek diğer alanlar (JSON nesnesi)';
+COMMENT ON COLUMN message_proxy.auth_profile.custom_headers_json IS 'Token isteğine eklenecek header''lar (JSON nesnesi). Örn: {"realm":"zenergy"}';
+COMMENT ON COLUMN message_proxy.auth_profile.token_field IS 'Token cevabında access token alanının yolu. İç içe için nokta: data.access_token';
+COMMENT ON COLUMN message_proxy.auth_profile.expires_field IS 'Token cevabında geçerlilik süresi (saniye) alanının yolu';
+COMMENT ON COLUMN message_proxy.auth_profile.default_ttl_seconds IS 'Cevapta süre yoksa token kaç saniye kullanılsın';
+COMMENT ON COLUMN message_proxy.auth_profile.token_prefix IS 'Authorization header değerinin öneki. Örn: Bearer';
+COMMENT ON COLUMN message_proxy.auth_profile.connect_timeout_ms IS 'Token isteği bağlantı timeout (ms)';
+COMMENT ON COLUMN message_proxy.auth_profile.read_timeout_ms IS 'Token isteği cevap okuma timeout (ms)';
+
+-- swagger_source → auth_profile (NULL: swagger dokümanı token istemiyor).
+-- Kolon ve FK birlikte eklenir; kolon zaten varsa ifadenin tamamı atlanır (idempotent).
+ALTER TABLE message_proxy.swagger_source ADD COLUMN IF NOT EXISTS auth_profile_id uuid
+    CONSTRAINT fk1_swagger_source REFERENCES message_proxy.auth_profile (id);
+COMMENT ON COLUMN message_proxy.swagger_source.auth_profile_id IS 'Swagger dokümanı okunurken kullanılacak token tanımı (auth_profile.id); NULL ise token gönderilmez';
+
+-- ---------------------------------------------------------------------
+-- app_registry : Entegre olunan uygulamalar (adres, base path, swagger, amaç)
+-- swagger_source ve proxy_route bu tabloya bağlanır.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS message_proxy.app_registry (
+    -- <BASE_COLUMNS>
+    id                      uuid                        NOT NULL DEFAULT gen_random_uuid(),
+    id_serial               SERIAL                      NOT NULL,
+    etag                    uuid                        NOT NULL DEFAULT gen_random_uuid(),
+    status                  smallint                    NOT NULL DEFAULT 3,
+    date_of_recorded        timestamp without time zone NOT NULL DEFAULT now(),
+    user_who_recorded       character varying(50)       NOT NULL DEFAULT '-'::character varying,
+    date_of_last_updated    timestamp without time zone NOT NULL DEFAULT now(),
+    user_who_last_updated   character varying(50)       NOT NULL DEFAULT '-'::character varying,
+    counter_of_unique_data  bigint                      NOT NULL DEFAULT 0,
+    -- Tabloya özel alanlar
+    app_code                character varying(50)       NOT NULL,
+    app_name                character varying(150)      NOT NULL,
+    app_purpose             text,
+    app_owner               character varying(100)      NOT NULL DEFAULT '-'::character varying,
+    base_url                character varying(500)      NOT NULL,
+    base_path               character varying(200)      NOT NULL DEFAULT '-'::character varying,
+    has_swagger             smallint                    NOT NULL DEFAULT 0,
+    swagger_path            character varying(300)      NOT NULL DEFAULT '/swagger-ui/index.html'::character varying,
+    auth_profile_id         uuid,
+    CONSTRAINT app_registry_pkey PRIMARY KEY (id),
+    CONSTRAINT uk0_app_registry UNIQUE (id_serial),
+    CONSTRAINT uk1_app_registry UNIQUE (app_code, counter_of_unique_data),
+    CONSTRAINT fk1_app_registry FOREIGN KEY (auth_profile_id) REFERENCES message_proxy.auth_profile (id)
+);
+
+COMMENT ON TABLE  message_proxy.app_registry IS 'Entegre olunan uygulamalar; swagger_source ve proxy_route bu tabloya bağlanır';
+COMMENT ON COLUMN message_proxy.app_registry.id_serial IS 'Sıralı ID için. Sorgulardaki sıralama kolaylığı için';
+COMMENT ON COLUMN message_proxy.app_registry.etag IS 'Versiyon kontrolü yaparak aynı anda tek transaction a müsade etmek için';
+COMMENT ON COLUMN message_proxy.app_registry.status IS '1: CANCELLED, 2: PASSIVE, 3: ACTIVE, 4: CLOSED';
+COMMENT ON COLUMN message_proxy.app_registry.counter_of_unique_data IS 'CANCELLED kayıtlarda sequence ile artırılır; aynı iş anahtarı tekrar eklenebilsin diye UK''ya dahildir';
+COMMENT ON COLUMN message_proxy.app_registry.app_code IS 'Uygulama kodu';
+COMMENT ON COLUMN message_proxy.app_registry.app_name IS 'Uygulama adı';
+COMMENT ON COLUMN message_proxy.app_registry.app_purpose IS 'Uygulamanın amacı';
+COMMENT ON COLUMN message_proxy.app_registry.app_owner IS 'Sorumlu ekip / kişi';
+COMMENT ON COLUMN message_proxy.app_registry.base_url IS 'Şema + host + port. Örn: http://localhost:7261';
+COMMENT ON COLUMN message_proxy.app_registry.base_path IS 'Context path; yoksa ''-''. Örn: /erp. Tam adres = base_url + base_path';
+COMMENT ON COLUMN message_proxy.app_registry.has_swagger IS '0: Hayır, 1: Evet - 1 ise swagger_source otomatik oluşturulur / güncellenir';
+COMMENT ON COLUMN message_proxy.app_registry.swagger_path IS 'Swagger adresinin tam adrese göre yolu. Örn: /swagger-ui/index.html veya /v3/api-docs';
+COMMENT ON COLUMN message_proxy.app_registry.auth_profile_id IS 'Swagger dokümanı okunurken kullanılacak token tanımı (auth_profile.id)';
+
+-- swagger_source → app_registry (1:1; NULL: uygulamaya bağlı olmayan, elle yönetilen kaynak)
+ALTER TABLE message_proxy.swagger_source ADD COLUMN IF NOT EXISTS app_registry_id uuid
+    CONSTRAINT fk2_swagger_source REFERENCES message_proxy.app_registry (id);
+COMMENT ON COLUMN message_proxy.swagger_source.app_registry_id IS 'Kaynağın ait olduğu uygulama (app_registry.id); doluysa adres/token alanları uygulamadan yönetilir';
+-- uk2: bir uygulamanın tek (iptal edilmemiş) swagger kaynağı olur
+CREATE UNIQUE INDEX IF NOT EXISTS uk2_swagger_source
+    ON message_proxy.swagger_source (app_registry_id, counter_of_unique_data)
+    WHERE app_registry_id IS NOT NULL;
+
+-- proxy_route → app_registry
+ALTER TABLE message_proxy.proxy_route ADD COLUMN IF NOT EXISTS target_app_registry_id uuid
+    CONSTRAINT fk1_proxy_route REFERENCES message_proxy.app_registry (id);
+ALTER TABLE message_proxy.proxy_route ADD COLUMN IF NOT EXISTS source_app_registry_id uuid
+    CONSTRAINT fk2_proxy_route REFERENCES message_proxy.app_registry (id);
+COMMENT ON COLUMN message_proxy.proxy_route.target_app_registry_id IS 'İsteğin iletildiği uygulama; doluysa target_url göreli (/ ile başlayan) yazılabilir: tam adres = uygulama adresi + target_url';
+COMMENT ON COLUMN message_proxy.proxy_route.source_app_registry_id IS 'Bu route''u çağıran uygulama (bilgi amaçlı; entegrasyon haritası için)';
+CREATE INDEX IF NOT EXISTS ix1_proxy_route ON message_proxy.proxy_route (target_app_registry_id);
+CREATE INDEX IF NOT EXISTS ix2_proxy_route ON message_proxy.proxy_route (source_app_registry_id);

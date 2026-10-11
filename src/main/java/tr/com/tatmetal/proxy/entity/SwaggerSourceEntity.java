@@ -1,6 +1,7 @@
 package tr.com.tatmetal.proxy.entity;
 
 import java.sql.Timestamp;
+import java.util.UUID;
 
 import tr.com.zenergy.mini_jpa.annotation.dao.Column;
 import tr.com.zenergy.mini_jpa.annotation.dao.Entity;
@@ -28,6 +29,10 @@ public class SwaggerSourceEntity extends BaseEntity {
     private SyncResultEnum lastSyncResult;
     @Column(name = "last_sync_message") private String lastSyncMessage;
     @Column(name = "endpoint_count") private int endpointCount;
+    /** Doküman okunurken kullanılacak token tanımı (auth_profile.id); null ise token gönderilmez. */
+    @Column(name = "auth_profile_id", isTyped = true, type = "UUID") private UUID authProfileId;
+    /** Kaynağın ait olduğu uygulama; doluysa adres / token alanları uygulamadan yönetilir. */
+    @Column(name = "app_registry_id", isTyped = true, type = "UUID") private UUID appRegistryId;
 
     public SwaggerSourceEntity() {
     }
@@ -104,6 +109,22 @@ public class SwaggerSourceEntity extends BaseEntity {
         this.endpointCount = endpointCount;
     }
 
+    public UUID getAuthProfileId() {
+        return authProfileId;
+    }
+
+    public void setAuthProfileId(UUID authProfileId) {
+        this.authProfileId = authProfileId;
+    }
+
+    public UUID getAppRegistryId() {
+        return appRegistryId;
+    }
+
+    public void setAppRegistryId(UUID appRegistryId) {
+        this.appRegistryId = appRegistryId;
+    }
+
     @Override
     public String toString() {
         return "SwaggerSourceEntity{"
@@ -116,6 +137,8 @@ public class SwaggerSourceEntity extends BaseEntity {
                 + ", lastSyncResult=" + lastSyncResult
                 + ", lastSyncMessage='" + lastSyncMessage + '\''
                 + ", endpointCount=" + endpointCount
+                + ", authProfileId=" + authProfileId
+                + ", appRegistryId=" + appRegistryId
                 + '}';
     }
 }

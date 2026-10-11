@@ -6,6 +6,7 @@ import java.util.UUID;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -73,5 +74,11 @@ public class ProxyRouteResources {
     @GetMapping("/cache")
     public ResponseEntity<List<ProxyRouteDefinition>> getCache() {
         return ResponseEntity.ok(proxyRouteCacheService.getAll());
+    }
+
+    /** Doğrulama hataları (ör. göreli targetUrl için hedef uygulama yok) → 400. */
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<Map<String, String>> handleValidation(IllegalArgumentException e) {
+        return ResponseEntity.badRequest().body(Map.of("error", "VALIDATION_ERROR", "message", String.valueOf(e.getMessage())));
     }
 }

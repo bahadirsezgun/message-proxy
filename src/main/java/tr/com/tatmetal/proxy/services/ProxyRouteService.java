@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import tr.com.tatmetal.proxy.dao.AppRegistryDaoImpl;
 import tr.com.tatmetal.proxy.dao.ProxyRouteDaoImpl;
 import tr.com.tatmetal.proxy.entity.ProxyRouteEntity;
 
@@ -22,7 +23,11 @@ public class ProxyRouteService {
     private final ProxyRouteCacheService proxyRouteCacheService;
     private final Logger logger = LoggerFactory.getLogger(ProxyRouteService.class);
 
-    public ProxyRouteService(ProxyRouteDaoImpl proxyRouteDao, ProxyRouteCacheService proxyRouteCacheService) {
+    private final AppRegistryDaoImpl appRegistryDao;
+
+    public ProxyRouteService(ProxyRouteDaoImpl proxyRouteDao, ProxyRouteCacheService proxyRouteCacheService,
+                             AppRegistryDaoImpl appRegistryDao) {
+        this.appRegistryDao = appRegistryDao;
         this.proxyRouteDao = proxyRouteDao;
         this.proxyRouteCacheService = proxyRouteCacheService;
     }
@@ -58,6 +63,32 @@ public class ProxyRouteService {
     private void normalize(ProxyRouteEntity entity) {
         if (entity != null && entity.getSourcePath() != null && !"-".equals(entity.getSourcePath())) {
             entity.setSourcePath(ProxyRouteCacheService.normalizePath(entity.getSourcePath()));
+        }
+        if (entity != null) {
+            validateAppLinks(entity);
+        }
+    }
+
+    /**
+     * Uygulama bağlantılarını doğrular: verilen uygulamalar var ve iptal edilmemiş olmalı;
+     * göreli target_url ("/..." ile başlayan) için hedef uygulama zorunludur.
+     */
+    private void validateAppLinks(ProxyRouteEntity entity) {
+        if (entity.getTargetAppRegistryId() != null && appRegistryDao.getById(entity.getTargetAppRegistryId()) == null) {
+            throw new IllegalArgumentException("targetAppRegistryId ile uygulama bulunamadı ya da iptal edilmiş: "
+                    + entity.getTargetAppRegistryId());
+        }
+        if (entity.getSourceAppRegistryId() != null && appRegistryDao.getById(entity.getSourceAppRegistryId()) == null) {
+            throw new IllegalArgumentException("sourceAppRegistryId ile uygulama bulunamadı ya da iptal edilmiş: "
+                    + entity.getSourceAppRegistryId());
+        }
+        String targetUrl = entity.getTargetUrl();
+        if (targetUrl != null && !targetUrl.isBlank()) {
+            entity.setTargetUrl(targetUrl.trim());
+            if (!ProxyRouteCacheService.isAbsoluteUrl(targetUrl) && entity.getTargetAppRegistryId() == null) {
+                throw new IllegalArgumentException("targetUrl göreli (" + targetUrl.trim() + "); göreli adres için "
+                        + "targetAppRegistryId zorunludur. Ya tam adres (http://...) yazın ya da hedef uygulamayı seçin.");
+            }
         }
     }
 

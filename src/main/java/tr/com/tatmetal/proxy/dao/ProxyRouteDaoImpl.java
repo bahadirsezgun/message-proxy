@@ -1,6 +1,8 @@
 package tr.com.tatmetal.proxy.dao;
 
 import static tr.com.tatmetal.proxy.dao.sql.ProxyRouteSql.PROXY_ROUTE_GET_ACTIVE_SQL;
+import static tr.com.tatmetal.proxy.dao.sql.ProxyRouteSql.PROXY_ROUTE_GET_APP_LINKED_SQL;
+import static tr.com.tatmetal.proxy.dao.sql.ProxyRouteSql.PROXY_ROUTE_GET_BY_APP_SQL;
 import static tr.com.tatmetal.proxy.dao.sql.ProxyRouteSql.PROXY_ROUTE_GET_ONE_SQL;
 import static tr.com.tatmetal.proxy.dao.sql.ProxyRouteSql.PROXY_ROUTE_GET_SQL;
 
@@ -81,6 +83,28 @@ public class ProxyRouteDaoImpl {
         } catch (Exception e) {
             logger.error(e.toString());
             throw new IllegalStateException("Aktif kayıtlar okunamadı: " + e.getMessage(), e);
+        }
+    }
+
+    /** Uygulamayı çağıran ya da ona giden route'lar. Hata durumunda exception fırlatır. */
+    public List<ProxyRouteEntity> getByAppRegistryId(UUID appRegistryId) {
+        try {
+            Map<String, Object> queryMap = new HashMap<>();
+            queryMap.put("appRegistryId", appRegistryId);
+            return exdbJdbcTemplate.findEntityList(PROXY_ROUTE_GET_BY_APP_SQL, queryMap, ProxyRouteEntity.class);
+        } catch (Exception e) {
+            logger.error(e.toString());
+            throw new IllegalStateException("Uygulamanın route'ları okunamadı: " + e.getMessage(), e);
+        }
+    }
+
+    /** Herhangi bir uygulamaya bağlı tüm route'lar. Hata durumunda exception fırlatır. */
+    public List<ProxyRouteEntity> getAppLinkedList() {
+        try {
+            return exdbJdbcTemplate.findEntityList(PROXY_ROUTE_GET_APP_LINKED_SQL, new HashMap<>(), ProxyRouteEntity.class);
+        } catch (Exception e) {
+            logger.error(e.toString());
+            throw new IllegalStateException("Uygulamaya bağlı route'lar okunamadı: " + e.getMessage(), e);
         }
     }
 }

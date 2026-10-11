@@ -16,6 +16,14 @@ public final class SwaggerSourceSql {
     public static final String SWAGGER_SOURCE_GET_BY_ID_SQL =
             "SELECT * FROM message_proxy.swagger_source WHERE id=:id AND status<>1";
 
+    /** Uygulamaya bağlı (iptal edilmemiş) swagger kaynağı. */
+    public static final String SWAGGER_SOURCE_GET_BY_APP_SQL =
+            "SELECT * FROM message_proxy.swagger_source WHERE app_registry_id=:appRegistryId AND status<>1";
+
+    /** Aynı kodlu (iptal edilmemiş) swagger kaynağı; uygulama oluşturulurken mevcut kaynağı sahiplenmek için. */
+    public static final String SWAGGER_SOURCE_GET_BY_CODE_SQL =
+            "SELECT * FROM message_proxy.swagger_source WHERE source_code=:sourceCode AND status<>1";
+
     /** Zamanlanmış senkronizasyona girecek kaynaklar: ACTIVE ve auto_sync = 1. */
     public static final String SWAGGER_SOURCE_GET_AUTO_SYNC_SQL =
             "SELECT * FROM message_proxy.swagger_source WHERE status=3 AND auto_sync=1 ORDER BY id_serial";
