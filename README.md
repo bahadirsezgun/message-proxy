@@ -7,6 +7,7 @@ Gelen REST isteklerini, veritabanında tanımlı kurallara göre başka bir sist
 - Route ve eşleştirme tanımları PostgreSQL'de tutulur. Uygulama açılışta bunları **Redis**'e yükler, isteklerde sadece Redis'ten okur.
 - Hedefin cevabı (status, header, gövde) isteği gönderen sisteme aynen döner.
 - Her iletim `proxy_message_log` tablosuna kaydedilir.
+- Ayrıca entegre olunan servislerin **swagger dokümanları okunup** tüm endpoint'leri `swagger_endpoint` tablosuna yazılır ve güncel tutulur (bkz. [Swagger'dan endpoint senkronizasyonu](#swaggerdan-endpoint-senkronizasyonu)).
 
 ---
 
@@ -40,7 +41,7 @@ Gelen REST isteklerini, veritabanında tanımlı kurallara göre başka bir sist
 | Spring Boot | 2.6.4 |
 | Spring Cloud | 2021.0.1 (OpenFeign + Apache HttpClient 5) |
 | Veritabanı | PostgreSQL 13+ (JDBC, kurum içi `mini_jpa` 0.0.341) |
-| Önbellek | Redis (`redisson-spring-boot-starter` 3.27.0, `StringRedisTemplate` ile kullanılır) |
+| Önbellek | Redis (`spring-boot-starter-data-redis` / Lettuce, sürüm Boot BOM'undan; `StringRedisTemplate` ile kullanılır) |
 | Güvenlik | Kurum içi `exss-service` 0.0.67 |
 | Lombok | Kullanılmaz |
 
@@ -157,6 +158,7 @@ Tablo bazlı sınıf isimlendirmesi (ör. `proxy_field_map` tablosu):
 Spring Boot giriş noktası.
 - `tr.com.tatmetal.proxy` ile birlikte `tr.com.zenergy.mini_jpa` paketini de tarar. Böylece `@ExtendsBaseEntity` aspect'i gibi `mini_jpa` bileşenleri bean olarak yüklenir.
 - `@EnableFeignClients` ile `client` paketindeki Feign client'larını etkinleştirir.
+- `@EnableScheduling` ile zamanlanmış görevleri açar (`SwaggerSyncScheduler`).
 
 ---
 
@@ -178,6 +180,14 @@ Proxy'nin **giriş kapısı**. `${proxy.gateway.prefix}/**` (varsayılan `/proxy
 
 #### `ProxyMessageLogResources`
 `/api/v1/proxy-message-log`: iletim loglarını **salt okunur** sorgular. Kayıtları `ProxyForwardService` ve `ProxyGatewayService` yazar.
+
+#### `SwaggerSourceResources`
+`/api/v1/swagger-source`: swagger kaynaklarının CRUD işlemleri ve elle senkronizasyon (`/{id}/sync`, `/sync`).
+- `IllegalArgumentException` (eksik `sourceCode`, geçersiz `swaggerUrl`) yakalanır ve **400** `{"message": "..."}` döner.
+- `/{id}/sync` kaynak yoksa veya CANCELLED ise 404 döner.
+
+#### `SwaggerEndpointResources`
+`/api/v1/swagger-endpoint`: okunan endpoint'leri sorgular. Ekleme ve silme yoktur; `PUT` sadece `status`'u (ör. PASSIVE) değiştirmek için kullanılır.
 
 ---
 
@@ -248,6 +258,30 @@ Eşleştirmesi yapılmış isteği **hedefe iletir** ve iletimi loglar. Tablodan
 - Kayıt öncesi `proxyRouteId` zorunluluğunu ve alan yolu söz dizimini doğrular, alan yollarındaki boşlukları kırpar.
 - Her değişiklikten sonra Redis'i yeniler.
 
+#### `SwaggerSyncService`
+Swagger senkronizasyonunun **orkestratörü**. Tablodan bağımsızdır.
+- **`sync(source)`**: dokümanı `SwaggerDocLoader` ile okur, `SwaggerSpecParser` ile endpoint'lere çevirir, tek transaction'da upsert + CANCELLED işlemini yapar, sonucu `swagger_source`'a yazar ve `SwaggerSyncResult` döner. Exception fırlatmaz; her hata sonuca `ERROR` olarak yazılır.
+- **`sync(id)`**: kaynağı `id` ile bulur (CANCELLED hariç). Yoksa `null`.
+- **`syncAllAuto()`**: `status = 3` ve `auto_sync = 1` olan kaynakları sırayla senkronize eder.
+- Transaction `exDb` üzerinde `TransactionTemplate` ile açılır. HTTP okuma transaction dışındadır.
+- Kilit alınamazsa (başka senkronizasyon sürüyor) `skipped = true` döner ve `swagger_source`'a yazmaz.
+- Yazan kullanıcı olarak `user_who_recorded` / `user_who_last_updated` alanlarına `swagger-sync` yazılır.
+
+#### `SwaggerSyncScheduler`
+Otomatik senkronizasyon. `swagger.sync.enabled=false` ise bean hiç oluşmaz.
+- **`onStartup()`**: `ApplicationReadyEvent` ile (yani `schema.sql` çalıştıktan sonra) `swagger.sync.on-startup=true` ise `syncAllAuto()` çağırır.
+- **`onSchedule()`**: `swagger.sync.cron` zamanlamasıyla `syncAllAuto()` çağırır.
+- Hata uygulamayı durdurmaz, sadece loglanır.
+
+#### `SwaggerSourceService`
+`swagger_source` için CRUD.
+- Kayıt öncesi `sourceCode` ve `swaggerUrl` zorunluluğunu, `swaggerUrl`'in `http(s)://` ile başladığını kontrol eder; boş alanlara tablo varsayılanlarını (`-`, `autoSync = 1`, `lastSyncResult = NEVER`) yazar.
+- **`save`**: kayıttan sonra `autoSync` 0 değilse hemen senkronize eder ve kaydı son hâliyle (`lastSync*` dolu) döner. Okuma hatası kaydı engellemez.
+- `saveAll` ve `update` senkronizasyon başlatmaz.
+
+#### `SwaggerEndpointService`
+`swagger_endpoint` için okuma (`getOne`, `getByCondition`) ve `update`. Ekleme/silme bilerek yoktur; kayıtları `SwaggerSyncService` yönetir.
+
 ---
 
 ### `client` — OpenFeign
@@ -258,6 +292,9 @@ Dinamik hedeflere istek atan **genel Feign client**.
 - `Request.Options` parametresi timeout'u çağrı bazında belirler.
 - Gövde `byte[]` olarak taşınır; içerik dönüştürülmez.
 - Metotlar: `get`, `post`, `put`, `patch`, `delete`. PATCH desteği Apache HttpClient 5 (`feign-hc5`) ile gelir.
+
+#### `SwaggerDocClient`
+Swagger dokümanlarını okumak için genel Feign client (`get(URI, Request.Options, headers)`). `ProxyForwardClient` gibi hedef adresi `URI` parametresiyle çağrı bazında alır. Timeout'lar `swagger.sync.connect-timeout-ms` / `read-timeout-ms` ile belirlenir. `ProxyFeignConfig`'i kullanır (retry yok).
 
 Sabit adresli başka bir sisteme çağrı gerekirse bu paketa ayrı bir `@FeignClient(name = "...", url = "${...}")` eklenmelidir.
 
@@ -292,6 +329,8 @@ Tüm entity'ler `mini_jpa` `BaseEntity`'den extend eder. Standart alanlar (`id`,
 | `ProxyRouteEntity` | `proxy_route` | Gelen path/metot → hedef tanımı |
 | `ProxyFieldMapEntity` | `proxy_field_map` | Route'a bağlı kaynak alan → hedef alan eşleştirmesi |
 | `ProxyMessageLogEntity` | `proxy_message_log` | İletim kaydı. `toString()` gövde ve header'ları bilerek yazmaz. |
+| `SwaggerSourceEntity` | `swagger_source` | Swagger adresi okunacak servis ve son senkronizasyon sonucu |
+| `SwaggerEndpointEntity` | `swagger_endpoint` | Swagger'dan okunan endpoint. `toString()` JSON kolonlarını yazmaz. |
 
 Kolon detayları için [Veritabanı tabloları](#veritabanı-tabloları) bölümüne bakın.
 
@@ -315,10 +354,32 @@ Ek metotlar:
 | `ProxyRouteDaoImpl` | `getActiveList()` | `ProxyRouteSql.PROXY_ROUTE_GET_ACTIVE_SQL` | `status = 3` ve `source_path <> '-'` olan route'lar |
 | `ProxyFieldMapDaoImpl` | `getActiveList()` | `ProxyFieldMapSql.PROXY_FIELD_MAP_GET_ACTIVE_SQL` | Aktif route'lara ait aktif eşleştirmeler, `field_order` sırasıyla |
 | `ProxyMessageLogDaoImpl` | — | — | Sadece standart metotlar |
+| `SwaggerSourceDaoImpl` | `getById(id)` | `SwaggerSourceSql.SWAGGER_SOURCE_GET_BY_ID_SQL` | etag'siz tekil okuma, CANCELLED hariç |
+| `SwaggerSourceDaoImpl` | `getAutoSyncSources()` | `SwaggerSourceSql.SWAGGER_SOURCE_GET_AUTO_SYNC_SQL` | `status = 3` ve `auto_sync = 1` |
+| `SwaggerSourceDaoImpl` | `updateSyncResult(...)` | `SwaggerSourceSql.SWAGGER_SOURCE_UPDATE_SYNC_RESULT_SQL` | `last_sync_*` ve `endpoint_count` yazar; etag'e dokunmaz, `endpoint_count` null gelirse eskisini korur |
+| `SwaggerEndpointDaoImpl` | `currentSyncTime()` | `SwaggerEndpointSql.SWAGGER_ENDPOINT_SYNC_TIME_SQL` | Veritabanı saati (`LOCALTIMESTAMP`) |
+| `SwaggerEndpointDaoImpl` | `tryLockSource(id)` | `SwaggerEndpointSql.SWAGGER_ENDPOINT_TRY_LOCK_SQL` | Kaynak bazlı transaction kilidi (`pg_try_advisory_xact_lock`) |
+| `SwaggerEndpointDaoImpl` | `upsert(...)` | `SwaggerEndpointSql.SWAGGER_ENDPOINT_UPSERT_SQL` | `INSERT ... ON CONFLICT uk1 DO UPDATE`; `INSERTED` / `UPDATED` / `UNCHANGED` döner |
+| `SwaggerEndpointDaoImpl` | `cancelMissing(...)` | `SwaggerEndpointSql.SWAGGER_ENDPOINT_CANCEL_MISSING_SQL` | Bu çalışmada görülmeyenleri CANCELLED yapar, sayısını döner |
 
 `getActiveList()` diğer okuma metotlarından farklı olarak hata durumunda `null` dönmez, exception fırlatır. Böylece Redis'e eksik veri yazılmaz.
 
-`*Sql` sınıfları (`ProxyRouteSql`, `ProxyFieldMapSql`, `ProxyMessageLogSql`) sadece `public static final String` SQL sabitleri içerir.
+Swagger Dao'larındaki `upsert`, `cancelMissing`, `tryLockSource` ve `updateSyncResult` entity'ye bağlı olmayan SQL'ler olduğu için `exDb` üzerinde Spring `NamedParameterJdbcTemplate` ile çalışır; `upsert`, `cancelMissing` ve `tryLockSource` transaction içinde çağrılmalıdır.
+
+`*Sql` sınıfları (`ProxyRouteSql`, `ProxyFieldMapSql`, `ProxyMessageLogSql`, `SwaggerSourceSql`, `SwaggerEndpointSql`) sadece `public static final String` SQL sabitleri içerir.
+
+---
+
+### `swagger` — Swagger dokümanı okuma
+
+Veritabanına dokunmayan, swagger dokümanını bulma ve çözümleme sınıfları.
+
+| Sınıf | Açıklama |
+|---|---|
+| `SwaggerDocLoader` | **`load(swaggerUrl)`**: verilen adresten doküman(lar)ı bulur ve okur; en az bir `SwaggerDocument` döner, bulamazsa denenen adreslerle birlikte `IllegalStateException` fırlatır. Sıra için [Swagger adresinin çözülmesi](#swagger-adresinin-çözülmesi)'ne bakın. JSON ve YAML okur. |
+| `SwaggerSpecParser` | **`parse(document, baseUrlOverride)`**: OpenAPI 3.x / Swagger 2.0 dokümanını `SwaggerEndpointEntity` listesine çevirir (`swaggerSourceId` hariç). Kurallar için [Endpoint'e dönüştürme](#endpointe-dönüştürme)'ye bakın. |
+| `SwaggerDocument` | Okunmuş doküman: grup adı, okunduğu adres (göreli `servers` adreslerini çözmek için) ve JSON kökü. |
+| `SwaggerSyncResult` | Bir kaynağın senkronizasyon özeti; API cevabı olarak döner. Alanlar için [Senkronizasyon sonucu](#senkronizasyon-sonucu)'na bakın. |
 
 ---
 
@@ -342,8 +403,9 @@ Hepsi `IEnumNumber` uygular ve DB'de `smallint` olarak saklanır. JSON'da hem `i
 |---|---|---|
 | `HttpMethodEnum` | 0 `PASS_THROUGH`, 1 `GET`, 2 `POST`, 3 `PUT`, 4 `PATCH`, 5 `DELETE` | `proxy_route.source_method` (0 = tüm metotlar), `proxy_route.target_method` (0 = gelen metot) |
 | `MapDirectionEnum` | 1 `REQUEST`, 2 `RESPONSE` | `proxy_field_map.map_direction` |
-| `YesNoEnum` | 0 `NO`, 1 `YES` (JSON'da `true`/`false` da kabul edilir) | `log_body`, `pass_unmapped_fields`, `is_required` |
+| `YesNoEnum` | 0 `NO`, 1 `YES` (JSON'da `true`/`false` da kabul edilir) | `log_body`, `pass_unmapped_fields`, `is_required`, `auto_sync`, `deprecated` |
 | `ProxyResultEnum` | 1 `SUCCESS`, 2 `TARGET_ERROR`, 3 `CONNECTION_ERROR`, 4 `MAPPING_ERROR` | `proxy_message_log.result_type` |
+| `SyncResultEnum` | 0 `NEVER`, 1 `SUCCESS`, 2 `ERROR` | `swagger_source.last_sync_result`, `SwaggerSyncResult.result` |
 
 ---
 
@@ -448,6 +510,62 @@ Gövde kolonları (`source_request_body`, `request_body`, `response_body`) için
 - `proxy.log.max-body-length` (varsayılan 100000) karakterde kesilir.
 
 İndeksler: `(proxy_route_id, date_of_recorded)`, `(correlation_id)`, `(date_of_recorded)`.
+
+### `swagger_source` — Swagger kaynakları
+
+Her satır, endpoint'leri okunacak bir servistir: "şu servisin swagger dokümanını oku". Kullanıcı API ile girer; `last_sync_*` ve `endpoint_count` alanlarını senkron servisi yazar. Süreç için [Swagger'dan endpoint senkronizasyonu](#swaggerdan-endpoint-senkronizasyonu) bölümüne bakın.
+
+| Kolon | Tip | Zorunlu / Varsayılan | Açıklama | Örnek / geçerli değerler |
+|---|---|---|---|---|
+| `source_code` | varchar(50) | Zorunlu | Servisin benzersiz iş kodu (`uk1`). Loglarda ve senkronizasyon sonucunda görünür. | `ERP`, `IFS_PART` |
+| `source_description` | varchar(150) | `-` | Servisin açıklaması. **Sadece bilgi amaçlıdır**, çalışma anında kullanılmaz. | `ERP sipariş servisi` |
+| `swagger_url` | varchar(500) | Zorunlu | Dokümanın bulunacağı adres. swagger-ui sayfası, swagger-config, doğrudan doküman (JSON/YAML) ya da servis kökü olabilir. `http://` veya `https://` ile başlamalıdır (kayıtta kontrol edilir). Çözülme sırası için [Swagger adresinin çözülmesi](#swagger-adresinin-çözülmesi)'ne bakın. | `http://erp:8081/swagger-ui/index.html`, `http://erp:8081/v3/api-docs`, `http://erp:8081` |
+| `target_base_url` | varchar(500) | `-` | `swagger_endpoint.full_url` için taban adres. `-` ise dokümandaki `servers` (OAS3) ya da `host + basePath` (Swagger 2) kullanılır. Servis gateway / load balancer arkasındaysa ve dokümandaki adres dışarıdan geçerli değilse doldurun. Sondaki `/` önemsizdir. | `-`, `https://gw.tatmetal.com.tr/erp` |
+| `auto_sync` | smallint | 1 | Açılış ve zamanlanmış senkronizasyona dahil mi; 1 ise kayıt sırasında da hemen senkronize edilir. 0 olsa da `/{id}/sync` ile elle çalıştırılabilir. | 0 Hayır, 1 Evet |
+| `last_sync_date` | timestamp | null | Son senkronizasyonun (başarılı veya hatalı) veritabanı saatine göre zamanı. Hiç çalışmadıysa boş. | `2026-10-11 10:00:00.123` |
+| `last_sync_result` | smallint | 0 | Son senkronizasyonun sonucu. Kilit nedeniyle atlanan çalışmalar bu alanı değiştirmez. | 0 NEVER, 1 SUCCESS, 2 ERROR |
+| `last_sync_message` | varchar(2000) | `-` | Başarılıysa özet, hatalıysa hata mesajı. Doküman bulunamadığında denenen tüm adresleri ve sonuçlarını içerir. 2000 karakterde kesilir. | `12 endpoint: 2 yeni, 1 güncellenen, 9 değişmeyen, 0 kaldırılan (CANCELLED)` |
+| `endpoint_count` | integer | 0 | Son **başarılı** senkronizasyonda dokümanda bulunan endpoint sayısı. Hatalı çalışmada eski değer korunur. | `12` |
+
+Anahtar: `uk1_swagger_source (source_code, counter_of_unique_data)`.
+
+> `last_sync_*` ve `endpoint_count` güncellenirken `etag` **değiştirilmez**. Bunlar sistemin yazdığı durum bilgileridir; değişseydi kaynağı ekranda açık tutan kullanıcının `PUT` isteği her senkronizasyondan sonra etag hatası alırdı.
+
+### `swagger_endpoint` — Okunan endpoint'ler
+
+Bu tablo elle doldurulmaz; satırları sadece `SwaggerSyncService` ekler ve günceller. Her satır, bir kaynağın dokümanındaki tek bir `metot + path`'tir. Elle yapılabilecek tek değişiklik `status`'u PASSIVE yapmaktır.
+
+| Kolon | Tip | Açıklama | Örnek |
+|---|---|---|---|
+| `swagger_source_id` | uuid | Endpoint'in okunduğu kaynak (`fk1` → `swagger_source.id`). | `8d0f5a3e-...` |
+| `api_group` | varchar(100) | springdoc grup adı (swagger-config'deki `urls[].name`). Grup yoksa `-`. Aynı path farklı gruplarda varsa her grup için ayrı satır olur. | `-`, `public`, `admin` |
+| `http_method` | varchar(10) | Büyük harfle HTTP metodu. | `GET`, `POST`, `DELETE` |
+| `path` | varchar(1000) | Dokümandaki path, olduğu gibi (değişkenler `{...}` ile). Swagger 2'de `basePath` **dahil değildir**; o `full_url`'de bulunur. | `/api/v1/orders/{id}` |
+| `full_url` | varchar(1500) | Taban adres + path. Taban adres `target_base_url`'den, o yoksa dokümandan gelir (bkz. [Endpoint'e dönüştürme](#endpointe-dönüştürme)). Değişkenler doldurulmaz. | `http://erp.local:8081/api/v1/orders/{id}` |
+| `operation_id` | varchar(200) | OpenAPI `operationId`. Yoksa `-`. springdoc'ta genellikle Java metot adıdır. | `getOrder`, `-` |
+| `summary` | varchar(500) | Operasyon özeti; operasyonda yoksa path seviyesindeki. Yoksa `-`. | `Siparişi getir` |
+| `description` | text | Operasyon açıklaması; operasyonda yoksa path seviyesindeki. Yoksa boş. | `Sipariş başlığı ve kalemleri döner.` |
+| `tags` | varchar(500) | Virgülle ayrılmış tag listesi (tekrarlar ayıklanır). springdoc'ta genellikle controller adıdır. Yoksa `-`. | `order,write` |
+| `deprecated` | smallint | Dokümanda `deprecated: true` mu. | 0 Hayır, 1 Evet |
+| `request_content_type` | varchar(500) | İstek gövdesinin kabul ettiği içerik tipleri, virgülle ayrılmış. Gövdesiz endpoint'lerde `-`. | `application/json`, `multipart/form-data`, `-` |
+| `parameters_json` | text | Path, query, header ve cookie parametreleri; dokümandaki JSON dizisi olduğu gibi (Swagger 2'de `in: body` hariç). Path ve operasyon seviyesi birleştirilmiştir. Parametre yoksa boş. | `[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}]` |
+| `request_body_json` | text | İstek gövdesi tanımı: OAS3'te `requestBody`, Swagger 2'de `in: body` parametresi. `$ref`'ler çözülmez. Gövde yoksa boş. | `{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Order"}}}}` |
+| `responses_json` | text | Cevap tanımları (`responses` nesnesi), status kodu → tanım. `$ref`'ler çözülmez. | `{"200":{"description":"OK"},"404":{"description":"Not Found"}}` |
+| `last_seen_date` | timestamp | Endpoint'in dokümanda en son görüldüğü senkronizasyonun zamanı. İçerik değişmese de her başarılı senkronizasyonda güncellenir. CANCELLED satırlarda dokümandan kalkmadan önceki son görülme zamanı kalır. | `2026-10-11 10:00:00.123` |
+
+`status` değerlerinin bu tablodaki anlamı:
+
+| Değer | Anlam | Nasıl olur |
+|---|---|---|
+| 3 ACTIVE | Dokümanda var | Senkronizasyon ekledi |
+| 2 PASSIVE | Dokümanda var ama gizlenmiş | Kullanıcı `PUT /api/v1/swagger-endpoint` ile yaptı; senkronizasyon değiştirmez |
+| 1 CANCELLED | Dokümandan kalkmış (geçmiş kaydı) | Senkronizasyon yaptı; `counter_of_unique_data > 0` |
+
+Anahtar ve indeks:
+- `uk1_swagger_endpoint (swagger_source_id, api_group, http_method, path, counter_of_unique_data)`: upsert bu anahtarla yapılır (`ON CONFLICT`). Aktif satırlarda `counter_of_unique_data = 0`'dır.
+- `ix1_swagger_endpoint (swagger_source_id, status)`.
+
+> JSON kolonları dokümandaki sırayla, boşluksuz yazılır. Kaynak servis aynı dokümanı farklı alan sırasıyla üretirse endpoint "güncellenen" sayılır (etag yenilenir); veri kaybı olmaz.
 
 ---
 
@@ -565,56 +683,189 @@ Eşleştirmeler: `customerName → musteri.ad`, `items[].code → kalemler[].uru
 
 ## Swagger'dan endpoint senkronizasyonu
 
-Bir servisin swagger-ui adresi `swagger_source` tablosuna kaydedilir; uygulama dokümanı okuyup tüm endpoint'leri `swagger_endpoint` tablosuna yazar ve güncel tutar.
+Bu modül, başka servislerin **swagger-ui / OpenAPI dokümanını okuyup** içindeki tüm endpoint'leri (`metot + path`) veritabanına yazar ve güncel tutar. Amaç, entegre olunan sistemlerin hangi uç noktaları sunduğunu elle girmeden tek yerde görmektir.
 
-**Kaynak ekleme** (kaydedince endpoint'ler hemen okunur, sonuç cevapta döner):
+Proxy iletim akışından **bağımsızdır**: `swagger_endpoint` kayıtları route oluşturmaz, Redis'e yüklenmez ve `/proxy/**` isteklerini etkilemez. Route tanımları yine `proxy_route`'a ayrıca girilir.
 
-```bash
-curl -X POST http://localhost:8080/api/v1/swagger-source \
-  -H 'Content-Type: application/json' \
-  -d '{"sourceCode":"ERP","sourceDescription":"ERP servisi","swaggerUrl":"http://erp:8081/swagger-ui/index.html"}'
+İki tablo kullanılır:
+
+| Tablo | Kim yazar | İçerik |
+|---|---|---|
+| [`swagger_source`](#swagger_source--swagger-kaynakları) | Kullanıcı (API ile); `last_sync_*` alanlarını senkron servisi | Okunacak servisin swagger adresi ve son senkronizasyonun sonucu |
+| [`swagger_endpoint`](#swagger_endpoint--okunan-endpointler) | Sadece senkron servisi | Dokümandan okunan her `metot + path` için bir satır |
+
+### Akış
+
+```mermaid
+sequenceDiagram
+    participant U as Kullanıcı / Zamanlayıcı
+    participant A as SwaggerSourceResources / SwaggerSyncScheduler
+    participant S as SwaggerSyncService
+    participant L as SwaggerDocLoader
+    participant T as Hedef servis (swagger)
+    participant P as SwaggerSpecParser
+    participant D as PostgreSQL
+
+    U->>A: POST /api/v1/swagger-source/{id}/sync (veya cron / açılış)
+    A->>S: sync(kaynak)
+    S->>L: load(swagger_url)
+    L->>T: GET swagger-ui / swagger-config / api-docs
+    T-->>L: OpenAPI 3 / Swagger 2 dokümanı (JSON veya YAML)
+    L-->>S: doküman(lar) (springdoc grupları dahil)
+    S->>P: parse(doküman, target_base_url)
+    P-->>S: endpoint listesi
+    S->>D: BEGIN + advisory lock (kaynak bazlı)
+    S->>D: her endpoint için UPSERT (swagger_endpoint)
+    S->>D: dokümanda görülmeyenleri CANCELLED yap
+    S->>D: COMMIT
+    S->>D: sonucu swagger_source.last_sync_* alanlarına yaz
+    S-->>A: SwaggerSyncResult (yeni / güncellenen / değişmeyen / kaldırılan)
 ```
 
-`swaggerUrl` için kabul edilen adresler:
+Adım adım:
 
-| Örnek | Not |
-|---|---|
-| `http://host:8080/swagger-ui/index.html` | springdoc swagger-ui; context path desteklenir |
-| `http://host:8080/swagger-ui.html` | eski springfox; `/v2/api-docs` bulunur |
-| `http://host:8080/swagger-ui/index.html?url=/openapi.yaml` | `?url=` / `?configUrl=` parametreleri kullanılır |
-| `http://host:8080/v3/api-docs` | doğrudan doküman (JSON veya YAML) |
-| `http://host:8080` | servis kökü; standart adresler sırayla denenir |
+| # | Adım | Sorumlu sınıf | Hata durumunda |
+|---|---|---|---|
+| 1 | Senkronizasyon tetiklenir (kayıt, elle, açılış veya cron) | `SwaggerSourceService`, `SwaggerSourceResources`, `SwaggerSyncScheduler` | — |
+| 2 | `swagger_url`'den doküman adresi bulunur ve doküman(lar) indirilir | `SwaggerDocLoader` + `SwaggerDocClient` | `ERROR`; mevcut endpoint'lere dokunulmaz |
+| 3 | Her dokümandaki `paths` → `metot + path` listesine çevrilir, tam adres hesaplanır | `SwaggerSpecParser` | `ERROR` |
+| 4 | Hiç endpoint çıkmadıysa işlem durdurulur | `SwaggerSyncService` | `ERROR` ("hiç endpoint bulunamadı"); mevcut kayıtlar korunur |
+| 5 | Transaction açılır, kaynak için kilit alınır | `SwaggerEndpointDaoImpl.tryLockSource` | Kilit alınamazsa çalışma **atlanır** (`skipped = true`) |
+| 6 | Her endpoint upsert edilir | `SwaggerEndpointDaoImpl.upsert` | Transaction geri alınır, `ERROR` |
+| 7 | Bu çalışmada görülmeyen endpoint'ler CANCELLED yapılır | `SwaggerEndpointDaoImpl.cancelMissing` | Transaction geri alınır, `ERROR` |
+| 8 | Sonuç `swagger_source`'a yazılır, `SwaggerSyncResult` döner | `SwaggerSourceDaoImpl.updateSyncResult` | Yazılamazsa sadece loglanır; sonuç yine döner |
 
-springdoc grupları (`/v3/api-docs/swagger-config` içindeki `urls`) varsa hepsi okunur, grup adı `api_group` alanına yazılır. OpenAPI 3.x ve Swagger 2.0 desteklenir.
+Adım 2–4 HTTP çağrısıdır ve **transaction dışında** yapılır; yavaş bir swagger sunucusu veritabanı bağlantısını meşgul etmez. Adım 5–7 tek transaction'dır: ya hepsi yazılır ya hiçbiri.
 
-**Ne zaman çalışır**
+### Ne zaman çalışır
 
-| Tetikleyici | Ayar |
-|---|---|
-| Kaynak kaydedildiğinde (`autoSync = 1`) | — |
-| Uygulama açılışında | `swagger.sync.on-startup=true` |
-| Zamanlanmış | `swagger.sync.cron=0 0 * * * *` (her saat başı) |
-| Elle, tek kaynak | `POST /api/v1/swagger-source/{id}/sync` |
-| Elle, tüm kaynaklar | `POST /api/v1/swagger-source/sync` |
+| Tetikleyici | Hangi kaynaklar | Ayar / uç nokta |
+|---|---|---|
+| Kaynak kaydedildiğinde | Kaydedilen kaynak (`autoSync` 0 değilse) | `POST /api/v1/swagger-source` |
+| Elle, tek kaynak | `id` ile verilen kaynak (CANCELLED hariç; PASSIVE ve `autoSync = 0` olanlar da çalışır) | `POST /api/v1/swagger-source/{id}/sync` |
+| Elle, tüm kaynaklar | `status = 3` ve `auto_sync = 1` | `POST /api/v1/swagger-source/sync` |
+| Uygulama açılışında | `status = 3` ve `auto_sync = 1` | `swagger.sync.on-startup=true` |
+| Zamanlanmış | `status = 3` ve `auto_sync = 1` | `swagger.sync.cron=0 0 * * * *` (her saat başı) |
 
-Zamanlayıcı ve açılış senkronizasyonu sadece `status = 3 (ACTIVE)` ve `auto_sync = 1` kaynakları işler. `swagger.sync.enabled=false` ikisini de kapatır.
+- `swagger.sync.enabled=false` açılış ve zamanlanmış senkronizasyonu kapatır; elle tetikleme çalışmaya devam eder.
+- `POST /api/v1/swagger-source/all` (toplu kayıt) ve `PUT` (güncelleme) senkronizasyon **başlatmaz**. Adres değiştirdiyseniz `/{id}/sync` çağırın.
+- Kaynaklar sırayla işlenir; bir kaynağın hatası diğerlerini durdurmaz.
 
-**Yazma kuralları**
+### Swagger adresinin çözülmesi
 
-- İş anahtarı: `swagger_source_id + api_group + http_method + path` (+ `counter_of_unique_data`).
-- Yeni endpoint eklenir; içeriği değişen güncellenir (etag yenilenir); aynı kalanın etag'ine dokunulmaz.
-- Dokümandan kalkan endpoint silinmez: `status = 1 (CANCELLED)`, `counter_of_unique_data` sequence'tan artırılır. Geri gelirse yeni satır açılır.
-- Elle `PASSIVE` yapılan endpoint senkronizasyonda `PASSIVE` kalır.
-- Doküman okunamaz ya da boş gelirse mevcut kayıtlara dokunulmaz; hata `last_sync_result = 2` ve `last_sync_message` alanlarına yazılır.
-- Yazma tek transaction'dadır; kaynak bazlı PostgreSQL advisory lock ile aynı kaynak aynı anda iki kez senkronize edilmez (birden fazla instance dahil).
-- `full_url` dokümandaki `servers` (OAS3) ya da `host + basePath` (Swagger 2) ile oluşturulur; servis gateway arkasındaysa `targetBaseUrl` alanına gateway adresi yazılır.
+`swagger_url` alanına swagger-ui sayfası, doküman adresi ya da servisin kök adresi yazılabilir. `SwaggerDocLoader` gerçek dokümanı şu sırayla arar ve ilk bulduğunda durur:
 
-Endpoint sorgulama örneği:
+| Sıra | Ne denenir | Örnek |
+|---|---|---|
+| 1 | Adreste `?configUrl=` varsa o swagger-config | `.../swagger-ui/index.html?configUrl=/v3/api-docs/swagger-config` |
+| 2 | Adreste `?url=` varsa o doküman | `.../swagger-ui/index.html?url=/openapi.yaml` |
+| 3 | Adresin kendisi (query olmadan); doküman ya da swagger-config ise kullanılır | `http://erp:8081/v3/api-docs` |
+| 4 | Servis kökü bulunur ve standart adresler sırayla denenir: `/v3/api-docs/swagger-config`, `/v3/api-docs`, `/v2/api-docs`, `/swagger.json`, `/openapi.json` | `http://erp:8081/erp/swagger-ui/index.html` → kök `http://erp:8081/erp` |
 
-```bash
-curl -X POST http://localhost:8080/api/v1/swagger-endpoint/search \
-  -H 'Content-Type: application/json' -d '{"swaggerSourceId":"<id>","httpMethod":"POST"}'
+- **Servis kökü**: adreste `/swagger-ui` geçiyorsa ondan önceki kısım, yoksa `/v3/api-docs`, `/v2/api-docs`, `/swagger.json`, `/openapi.json`, `/swagger-resources`'tan önceki kısım. Böylece context path (`/erp`) korunur.
+- **springdoc grupları**: swagger-config içinde `urls` listesi varsa her grup dokümanı ayrı okunur; grup adı `swagger_endpoint.api_group`'a yazılır. Gruplardan biri okunamazsa senkronizasyonun tamamı `ERROR` olur (eksik veriyle kalkan endpoint'ler yanlışlıkla CANCELLED olmasın diye).
+- **Doküman tanıma**: kökte `openapi` veya `swagger` alanı ve nesne olan `paths` varsa dokümandır. HTML cevaplar (`<` ile başlayan) atlanır. JSON değilse YAML olarak okunur.
+- **Sunucuya hiç ulaşılamazsa** (bağlantı reddi, DNS, timeout) 4. adımdaki adresler denenmez; her biri ayrı timeout bekletmesin diye hemen hata verilir.
+- Hata mesajında denenen her adres ve sonucu yazar: `http://erp:8081/v3/api-docs → HTTP 404; ...`.
+- İstek `Accept: application/json, application/yaml` ile atılır. Kimlik doğrulama header'ı gönderilmez (bkz. [Sınırlamalar](#sınırlamalar)).
+
+### Endpoint'e dönüştürme
+
+`SwaggerSpecParser` dokümandaki her `paths.<path>.<metot>` için bir `swagger_endpoint` satırı üretir. Desteklenen metotlar: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, TRACE.
+
+| Alan | OpenAPI 3.x | Swagger 2.0 |
+|---|---|---|
+| `full_url` | `servers[0].url` + path. `{değişken}`'ler `default` değeriyle doldurulur; göreli adresler doküman adresine göre çözülür. `servers` yoksa doküman adresinin kökü. | `schemes[0]://host + basePath` + path. Eksik olanlar doküman adresinden tamamlanır. |
+| `parameters_json` | Path seviyesi + operasyon seviyesi parametreler birleşir; aynı `name + in` varsa operasyondaki geçerlidir. | Aynı; `in: body` parametresi buradan çıkarılır. |
+| `request_body_json` | `requestBody` | `in: body` parametresi |
+| `request_content_type` | `requestBody.content` anahtarları | Gövde veya `formData` parametresi varsa `consumes` (operasyonda yoksa kökteki) |
+| `summary`, `description` | Operasyonda yoksa path seviyesinden | Aynı |
+
+- `swagger_source.target_base_url` doluysa (`-` değilse) `full_url` için dokümandaki adres yerine o kullanılır. Servis bir API gateway arkasındaysa gateway adresini buraya yazın.
+- `$ref` referansları **çözülmez**; JSON alanlarında olduğu gibi (`"#/components/schemas/Order"`) saklanır.
+- Uzun metinler kolon boyuna göre kesilir (ör. `summary` 500, `operation_id` 200 karakter).
+- Aynı çalışmada aynı `api_group + metot + path` iki kez gelirse ilki kullanılır.
+
+### Yazma kuralları
+
+İş anahtarı `swagger_source_id + api_group + http_method + path` (+ `counter_of_unique_data`) dır. Her endpoint için:
+
+| Durum | Ne yapılır | `etag` / `date_of_last_updated` | `last_seen_date` |
+|---|---|---|---|
+| Yeni endpoint | Eklenir, `status = 3` | Yeni | Senkron zamanı |
+| İçeriği değişmiş | Güncellenir | Yenilenir | Senkron zamanı |
+| Aynı kalmış | İçeriğe dokunulmaz | **Değişmez** | Senkron zamanı |
+| Dokümandan kalkmış | `status = 1 (CANCELLED)`, `counter_of_unique_data` sequence'tan artırılır | Yenilenir | Eski değer kalır |
+| Kalkmıştı, geri geldi | **Yeni satır** olarak eklenir; eski CANCELLED satır geçmiş olarak kalır | Yeni | Senkron zamanı |
+
+- "İçerik değişti" kontrolü şu kolonlarla yapılır: `full_url`, `operation_id`, `summary`, `description`, `tags`, `deprecated`, `request_content_type`, `parameters_json`, `request_body_json`, `responses_json`. Sadece `last_seen_date`'in değişmesi güncelleme sayılmaz.
+- **`status`'a senkronizasyon dokunmaz.** Elle `PASSIVE (2)` yapılan endpoint dokümanda durdukça PASSIVE kalır; dokümandan kalkarsa CANCELLED olur.
+- Bir endpoint'i listeden gizlemek için **PASSIVE** yapın. Silerseniz (`counter_of_unique_data` artar) bir sonraki senkronizasyonda yeni satır olarak geri gelir.
+- "Görülmedi" kararı `last_seen_date < senkron zamanı` ile verilir. Senkron zamanı **veritabanı saatinden** (`LOCALTIMESTAMP`, transaction başlangıcı) alınır; birden fazla uygulama sunucusu arasındaki saat farkı sonucu bozmaz.
+- Kaynak bazlı kilit `pg_try_advisory_xact_lock(hashtext('swagger_sync:<id>'))` ile alınır. Aynı kaynak için ikinci bir senkronizasyon (cron + elle, ya da iki instance) beklemez, atlanır. Kilit transaction bitince kendiliğinden bırakılır.
+- Doküman okunamaz, parse edilemez ya da hiç endpoint içermezse `swagger_endpoint`'e **hiç yazılmaz**. Böylece geçici bir kesinti tüm endpoint'leri CANCELLED yapmaz.
+
+### Senkronizasyon sonucu
+
+Her çalışma `swagger_source`'a ve API cevabına (`SwaggerSyncResult`) yazılır:
+
+| Durum | `last_sync_result` | `last_sync_message` | `endpoint_count` | `last_sync_date` |
+|---|---|---|---|---|
+| Başarılı | 1 `SUCCESS` | `12 endpoint: 2 yeni, 1 güncellenen, 9 değişmeyen, 0 kaldırılan (CANCELLED)` | Dokümandaki endpoint sayısı | Senkron zamanı |
+| Hata | 2 `ERROR` | Hata mesajı (denenen adresler dahil, 2000 karakterde kesilir) | **Eski değer korunur** | Hata zamanı |
+| Atlandı (kilit) | Değişmez | Değişmez | Değişmez | Değişmez |
+
+`SwaggerSyncResult` örneği (`POST /api/v1/swagger-source/{id}/sync` cevabı):
+
+```json
+{
+  "swaggerSourceId": "8d0f5a3e-1c2b-4e7a-9f10-2a3b4c5d6e7f",
+  "sourceCode": "ERP",
+  "result": { "id": 1, "value": "Başarılı", "engValue": "Success" },
+  "skipped": false,
+  "message": "12 endpoint: 2 yeni, 1 güncellenen, 9 değişmeyen, 0 kaldırılan (CANCELLED)",
+  "documentUrls": ["http://erp:8081/v3/api-docs/public", "http://erp:8081/v3/api-docs/admin"],
+  "endpointCount": 12,
+  "insertedCount": 2,
+  "updatedCount": 1,
+  "unchangedCount": 9,
+  "cancelledCount": 0,
+  "durationMs": 412
+}
 ```
+
+| Alan | Açıklama |
+|---|---|
+| `result` | `SUCCESS` / `ERROR`. Atlanan çalışmada kaynağın bir önceki sonucu. |
+| `skipped` | `true`: aynı kaynak için başka bir senkronizasyon sürdüğü için bu çalışma bir şey yapmadı. |
+| `documentUrls` | Gerçekten okunan doküman adresleri (grup başına bir tane). |
+| `endpointCount` | Dokümanlardaki toplam endpoint (tekrarlar ayıklanmış). Doküman okunamadıysa 0. |
+| `insertedCount` … `cancelledCount` | Yazma sonucu. Hata durumunda hepsi 0 (transaction geri alındığı için). |
+| `durationMs` | İndirme + yazma toplam süresi. |
+
+### Örnek: yeni bir servisi ekleme
+
+1. Kaynağı kaydedin. Kayıt cevabında `lastSyncResult` ve `lastSyncMessage` dolu döner:
+   ```bash
+   curl -X POST http://localhost:8080/api/v1/swagger-source \
+     -H 'Content-Type: application/json' \
+     -d '{"sourceCode":"ERP","sourceDescription":"ERP servisi","swaggerUrl":"http://erp:8081/swagger-ui/index.html"}'
+   ```
+2. `lastSyncResult.id = 2` ise `lastSyncMessage`'daki denenen adreslere bakın, adresi düzeltip (`PUT`) `/{id}/sync` çağırın.
+3. Endpoint'leri listeleyin:
+   ```bash
+   curl -X POST http://localhost:8080/api/v1/swagger-endpoint/search \
+     -H 'Content-Type: application/json' -d '{"swaggerSourceId":"<id>"}'
+   ```
+4. Servis gateway arkasındaysa `targetBaseUrl`'i gateway adresiyle güncelleyip tekrar senkronize edin; `full_url`'ler değişir (güncellenen olarak sayılır).
+
+### Sınırlamalar
+
+- Kimlik doğrulama gerektiren swagger adresleri desteklenmez (header/token gönderilmez). Swagger dokümanı proxy sunucusundan erişilebilir ve açık olmalıdır.
+- `$ref` şemaları çözülmez; `components` / `definitions` ayrıca saklanmaz.
+- Endpoint'lerden otomatik `proxy_route` üretilmez.
+- Swagger 1.x (`/swagger-resources` tabanlı eski springfox listeleri) desteklenmez; springfox'ta `/v2/api-docs` kullanılır.
+- Kaynak CANCELLED yapılsa da ona ait `swagger_endpoint` satırları olduğu gibi kalır; artık senkronize edilmez.
 
 ---
 
@@ -684,6 +935,40 @@ curl -X POST http://localhost:8080/api/v1/swagger-endpoint/search \
 |---|---|---|---|
 | GET | `/{id}/{etag}` | — | Tek log |
 | POST | `/search` | `{"correlationId":"..."}` veya `{"routeCode":"..."}` | Koşula göre listeleme |
+
+### `/api/v1/swagger-source`
+
+| Metot | Yol | Gövde | Açıklama |
+|---|---|---|---|
+| GET | `/{id}/{etag}` | — | Tek kaynak |
+| POST | `/search` | `{"sourceCode":"ERP"}` (opsiyonel) | Koşula göre listeleme |
+| POST | `/` | `SwaggerSourceEntity` | Ekle (+ `autoSync` ise hemen senkronize et; cevapta `lastSync*` dolu) |
+| POST | `/all` | `[SwaggerSourceEntity]` | Toplu ekle (senkronizasyon yok) |
+| PUT | `/` | `SwaggerSourceEntity` | Güncelle (senkronizasyon yok) |
+| DELETE | `/` | `SwaggerSourceEntity` | Sil (CANCELLED); endpoint satırları kalır |
+| POST | `/{id}/sync` | — | Kaynağı hemen senkronize et → `SwaggerSyncResult`. Kaynak yoksa 404. |
+| POST | `/sync` | — | `status = 3` ve `auto_sync = 1` olanların hepsi → `[SwaggerSyncResult]` |
+
+Eksik `sourceCode` veya geçersiz `swaggerUrl` 400 `{"message":"..."}` döner.
+
+Örnek kayıt:
+```json
+{
+  "sourceCode": "ERP",
+  "sourceDescription": "ERP servisi",
+  "swaggerUrl": "http://erp:8081/swagger-ui/index.html",
+  "targetBaseUrl": "-",
+  "autoSync": true
+}
+```
+
+### `/api/v1/swagger-endpoint`
+
+| Metot | Yol | Gövde | Açıklama |
+|---|---|---|---|
+| GET | `/{id}/{etag}` | — | Tek endpoint |
+| POST | `/search` | `{"swaggerSourceId":"...","httpMethod":"POST"}` | Koşula göre listeleme |
+| PUT | `/` | `SwaggerEndpointEntity` | Güncelle; pratikte sadece `status` (ör. 2 PASSIVE) için. Diğer alanlar bir sonraki senkronizasyonda dokümandaki değerle ezilir. |
 
 ---
 
@@ -830,6 +1115,12 @@ Yeni alan çalışma anında kullanılacaksa sadece entity'ye eklemek yetmez:
 | Redis'e entity değil `model` nesnesi yazılır | Önbellek `mini_jpa` sürümünden bağımsız kalsın |
 | Yükleme geçici anahtar + `RENAME` ile | Yenileme sırasında istekler yarım veri görmesin |
 | Redis yoksa açılış durmaz | Redis geç ayağa kalksa da uygulama açılsın, ilk istekte yüklensin |
+| Swagger okunamazsa endpoint'lere dokunulmaz | Geçici bir kesinti tüm endpoint'leri CANCELLED yapmasın |
+| Swagger grubu okunamazsa tüm senkronizasyon hata | Eksik dokümanla diğer grupların endpoint'leri kalkmış sayılmasın |
+| Swagger HTTP okuması transaction dışında | Yavaş bir swagger sunucusu DB bağlantısını tutmasın |
+| Kaynak bazlı advisory lock, bekleme yok | Cron + elle tetikleme ya da birden fazla instance aynı kaynağı aynı anda yazmasın |
+| Senkron zamanı DB saatinden | Sunucular arası saat farkı "dokümandan kalktı" kararını bozmasın |
+| Değişmeyen endpoint'in etag'i korunur | Endpoint'i ekranda açık tutan kullanıcı gereksiz etag hatası almasın |
 
 ---
 
@@ -841,7 +1132,15 @@ Yeni alan çalışma anında kullanılacaksa sadece entity'ye eklemek yetmez:
 | Tablolar oluşmuyor | İki DataSource da `@Primary` olabilir (bkz. `JdbcConfig`); `spring.sql.init.mode=always` olduğunu kontrol edin. |
 | Açılışta "Redis'e yüklenemedi" logu | Redis erişilemiyor. Uygulama açılır, Redis gelince ilk istekte yüklenir. |
 | Redis `NOAUTH` / bağlantı hatası, şifre tanımlı olduğu halde | **Redis property adları Spring Boot sürümüne bağlıdır.** Spring Boot 2.6'da adlar `spring.redis.host/port/password/username` şeklindedir. `spring.data.redis.*` Spring Boot 3'e aittir ve 2.6'da okunmaz; bu durumda bağlantı varsayılan localhost:6379 ve şifresiz yapılır. |
-| Redisson ile açılışta `NoSuchMethodError` / `ClassNotFoundException` (spring-data-redis) | `redisson-spring-boot-starter` 3.27.0 varsayılan olarak Spring Data Redis 3.2 modülünü (`redisson-spring-data-32`) getirir; Spring Boot 2.6 ise Spring Data Redis 2.6 kullanır. Redisson dokümanındaki gibi `redisson-spring-data-32`'yi exclude edip `redisson-spring-data-26` ekleyin veya `spring-boot-starter-data-redis`'e dönün. |
+| Açılışta `NoSuchMethodError: ...DnsNameResolverBuilder.socketChannelType` (Redisson) | `redisson-spring-boot-starter` 3.27.0 Spring Boot 3 / Netty 4.1.10x ister; Boot 2.6 Netty 4.1.74 getirir. Proje bu yüzden `spring-boot-starter-data-redis` (Lettuce) kullanır. pom'a Redisson tekrar eklenmemeli; IDE eski sınıfları tutuyorsa Maven projesini yenileyip `mvn clean` yapın. |
 | Gövde değişmeden gidiyor | Content-Type `json` içermiyor olabilir, eşleştirmenin `map_direction`'ı yanlış olabilir ya da cevap 2xx değildir (RESPONSE eşleştirmeleri sadece 2xx'te çalışır). |
 | PATCH çalışmıyor | `feign.httpclient.hc5.enabled=true` olmalı (Spring Cloud 2021.0.x'te `spring.cloud.openfeign.*` adları geçersizdir). |
 | 504 `TARGET_TIMEOUT` | Route'un `read_timeout_ms` değerini artırın. |
+| Swagger: `last_sync_result = 2`, "dokümanı bulunamadı" | `last_sync_message`'daki denenen adreslere bakın. Doküman adresini (`.../v3/api-docs`) doğrudan `swagger_url`'e yazmayı deneyin. springdoc'ta `springdoc.api-docs.path` değiştirilmişse yeni yol yazılmalıdır. |
+| Swagger: "adresine ulaşılamadı" | Proxy sunucusundan hedefe ağ erişimi yok, host/port yanlış ya da timeout kısa. `swagger.sync.connect-timeout-ms` / `read-timeout-ms`'i kontrol edin. |
+| Swagger: HTTP 401 / 403 | Swagger dokümanı kimlik doğrulama istiyor; desteklenmez. Hedef serviste api-docs yolunu açık bırakın. |
+| Swagger: "hiç endpoint bulunamadı" | Doküman boş `paths` içeriyor (ör. yanlış springdoc grubu ya da `packagesToScan`). Mevcut endpoint'ler korunmuştur. |
+| Swagger: `full_url` yanlış host / iç adres | Dokümandaki `servers` adresi dışarıdan geçerli değil. `target_base_url`'i doldurup tekrar senkronize edin. |
+| Swagger: sonuçta `skipped = true` | Aynı kaynak için başka bir senkronizasyon o an sürüyordu (cron, açılış ya da başka instance). Biraz sonra tekrar deneyin. |
+| Swagger: zamanlanmış senkronizasyon çalışmıyor | `swagger.sync.enabled=true` ve kaynağın `status = 3`, `auto_sync = 1` olduğunu kontrol edin. |
+| Swagger: sildiğim endpoint geri geldi | Silme `counter_of_unique_data`'yı artırdığı için bir sonraki senkronizasyon endpoint'i yeni satır olarak ekler. Gizlemek için `status = 2 (PASSIVE)` yapın. |
