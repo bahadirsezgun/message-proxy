@@ -1,5 +1,7 @@
 package tr.com.tatmetal.proxy.entity;
 
+import java.util.UUID;
+
 import tr.com.zenergy.mini_jpa.annotation.dao.Column;
 import tr.com.zenergy.mini_jpa.annotation.dao.Entity;
 import tr.com.zenergy.mini_jpa.entity.BaseEntity;
@@ -30,6 +32,10 @@ public class ProxyRouteEntity extends BaseEntity {
     private YesNoEnum logBody;
     @Column(name = "pass_unmapped_fields", isTyped = true, type = TypeUtil.I_ENUM_NUM)
     private YesNoEnum passUnmappedFields;
+    /** İsteğin iletildiği uygulama; doluysa target_url göreli ("/..." ile) yazılabilir. */
+    @Column(name = "target_app_registry_id", isTyped = true, type = "UUID") private UUID targetAppRegistryId;
+    /** Bu route'u çağıran uygulama (bilgi amaçlı, entegrasyon haritası için). */
+    @Column(name = "source_app_registry_id", isTyped = true, type = "UUID") private UUID sourceAppRegistryId;
 
     public ProxyRouteEntity() {
     }
@@ -114,6 +120,22 @@ public class ProxyRouteEntity extends BaseEntity {
         this.passUnmappedFields = passUnmappedFields;
     }
 
+    public UUID getTargetAppRegistryId() {
+        return targetAppRegistryId;
+    }
+
+    public void setTargetAppRegistryId(UUID targetAppRegistryId) {
+        this.targetAppRegistryId = targetAppRegistryId;
+    }
+
+    public UUID getSourceAppRegistryId() {
+        return sourceAppRegistryId;
+    }
+
+    public void setSourceAppRegistryId(UUID sourceAppRegistryId) {
+        this.sourceAppRegistryId = sourceAppRegistryId;
+    }
+
     @Override
     public String toString() {
         return "ProxyRouteEntity{"
@@ -127,6 +149,8 @@ public class ProxyRouteEntity extends BaseEntity {
                 + ", readTimeoutMs=" + readTimeoutMs
                 + ", logBody=" + logBody
                 + ", passUnmappedFields=" + passUnmappedFields
+                + ", targetAppRegistryId=" + targetAppRegistryId
+                + ", sourceAppRegistryId=" + sourceAppRegistryId
                 + '}';
     }
 }

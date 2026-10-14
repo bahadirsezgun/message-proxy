@@ -68,11 +68,12 @@
             <version>0.0.67</version>
         </dependency>
 
-        <!-- Route + alan eşleştirme tanımlarının önbelleği: Redis -->
+        <!-- Route + alan eşleştirme tanımlarının önbelleği: Redis (Lettuce, StringRedisTemplate).
+             Sürüm Spring Boot BOM'undan gelir. redisson-spring-boot-starter 3.27.0 Spring Boot 3 / Netty 4.1.10x
+             ister; Boot 2.6'nın Netty 4.1.74'ü ile açılışta NoSuchMethodError verir, bu yüzden kullanılmaz. -->
         <dependency>
-            <groupId>org.redisson</groupId>
-            <artifactId>redisson-spring-boot-starter</artifactId>
-            <version>3.27.0</version>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
         <!-- REST çağrıları: OpenFeign -->
         <dependency>
@@ -83,6 +84,12 @@
         <dependency>
             <groupId>io.github.openfeign</groupId>
             <artifactId>feign-hc5</artifactId>
+        </dependency>
+
+        <!-- Swagger/OpenAPI dokümanları YAML olarak da okunabilsin (sürüm Spring Boot BOM'undan gelir) -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.dataformat</groupId>
+            <artifactId>jackson-dataformat-yaml</artifactId>
         </dependency>
 
         <!-- Test -->
@@ -113,10 +120,5 @@
             </plugin>
         </plugins>
     </build>
-    <repositories>
-        <repository>
-            <id>github</id>
-            <url>https://maven.pkg.github.com/bahadirsezgun/zenergy-*</url>
-        </repository>
-    </repositories>
+
 </project>
